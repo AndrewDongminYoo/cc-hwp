@@ -116,9 +116,12 @@ class Fixtures(unittest.TestCase):
             for info in zin.infolist():
                 zout.writestr(info, zin.read(info.filename))
             zout.writestr("BinData/../../escaped.bin", b"payload")
+            absolute = os.path.join(self.tmp, "absolute.bin")
+            zout.writestr("BinData/" + absolute, b"payload")  # BinData//tmp/... after the prefix
         outdir = os.path.join(self.tmp, "a", "b", "images")
         written = h.save_images(p, h.load(p), outdir)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "a", "escaped.bin")))
+        self.assertFalse(os.path.exists(absolute))
         root = os.path.realpath(outdir)
         for w in written:
             self.assertTrue(os.path.realpath(w).startswith(root + os.sep), w)

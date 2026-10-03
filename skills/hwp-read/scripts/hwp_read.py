@@ -18,6 +18,7 @@ this script's own parser is the dependency-free path that works anywhere Python 
 from __future__ import annotations
 
 import argparse
+import collections
 import html
 import json
 import os
@@ -35,6 +36,39 @@ from typing import List, Optional, Union
 
 class Unsupported(Exception):
     """Document can't be read by this parser (protected, legacy format, ...)."""
+
+
+# Documents come from the internet: cap every decompressed part (ZIP member or
+# HWP5 stream) so a small archive cannot inflate into an out-of-memory crash.
+MAX_PART_BYTES = 128 * 1024 * 1024
+
+
+def _too_large(what: str) -> Unsupported:
+    return Unsupported(f"{what}의 압축 해제 크기가 {MAX_PART_BYTES} 바이트를 넘습니다. "
+                       "손상되었거나 압축 폭탄일 수 있는 문서라 읽지 않습니다.")
+
+
+def _inflate(raw: bytes, what: str) -> bytes:
+    d = zlib.decompressobj(-15)
+    out = d.decompress(raw, MAX_PART_BYTES)
+    if d.unconsumed_tail:
+        raise _too_large(what)
+    return out
+
+
+def _zip_read(z: zipfile.ZipFile, name: str) -> bytes:
+    with z.open(name) as f:
+        data = f.read(MAX_PART_BYTES + 1)
+    if len(data) > MAX_PART_BYTES:
+        raise _too_large(name)
+    return data
+
+
+def _xml(data: bytes):
+    """OWPML never declares a DTD; refusing one closes entity-expansion attacks."""
+    if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+        raise Unsupported("HWPX XML에 DTD/엔티티 선언이 있습니다. 정상 HWPX에는 없는 구조라 읽지 않습니다.")
+    return ET.fromstring(data)
 
 
 # ───────────────────────────── intermediate representation ─────────────────────────────
@@ -253,7 +287,7 @@ class Hwp5Reader:
 
     def _stream(self, path: str) -> bytes:
         raw = self.cfb.read(path)
-        return zlib.decompress(raw, -15) if self.compressed else raw
+        return _inflate(raw, path) if self.compressed else raw
 
     def read(self) -> Doc:
         if self.cfb.exists("PrvText"):
@@ -263,6 +297,8 @@ class Hwp5Reader:
             roots = _tree(_records(self._stream(f"BodyText/Section{n}")))
             self.doc.blocks.extend(self._paras(roots))
             n += 1
+        if n == 0:
+            raise Unsupported("HWP 컨테이너에 본문 섹션(BodyText/Section0)이 없습니다.")
         self.doc.meta["sections"] = n
         self.doc.images = [p.split("/", 1)[1] for p in self.cfb.list("BinData/")]
         return self.doc
@@ -435,12 +471,12 @@ class HwpxReader:
         import io
         self.z = zipfile.ZipFile(io.BytesIO(data))
         names = set(self.z.namelist())
-        mime = self.z.read("mimetype").decode(errors="replace").strip() if "mimetype" in names else ""
+        mime = _zip_read(self.z, "mimetype").decode(errors="replace").strip() if "mimetype" in names else ""
         if mime and "hwp" not in mime:
             raise Unsupported(f"ZIP 컨테이너지만 HWPX가 아닙니다 (mimetype={mime})")
         if not mime and "Contents/content.hpf" not in names:
             raise Unsupported("ZIP 컨테이너지만 HWPX 패키지 표지(mimetype, Contents/content.hpf)가 없습니다.")
-        manifest = self.z.read("META-INF/manifest.xml").decode(errors="replace") if "META-INF/manifest.xml" in names else ""
+        manifest = _zip_read(self.z, "META-INF/manifest.xml").decode(errors="replace") if "META-INF/manifest.xml" in names else ""
         if "encryption-data" in manifest:
             raise Unsupported("암호화된 HWPX 문서입니다.")
         self.doc = Doc("hwpx")
@@ -449,12 +485,14 @@ class HwpxReader:
     def _sections(self) -> List[str]:
         names = self.z.namelist()
         try:
-            hpf = ET.fromstring(self.z.read("Contents/content.hpf"))
+            hpf = _xml(_zip_read(self.z, "Contents/content.hpf"))
             items = {i.get("id"): i.get("href") for i in hpf.iter() if _local(i.tag) == "item"}
             spine = [items.get(r.get("idref")) for r in hpf.iter() if _local(r.tag) == "itemref"]
             secs = [s for s in spine if s and re.search(r"section\d+\.xml$", s)]
             if secs:
                 return [s if s in names else "Contents/" + s.split("/")[-1] for s in secs]
+        except Unsupported:
+            raise
         except Exception:
             pass
         return sorted((n for n in names if re.match(r"Contents/section\d+\.xml$", n)),
@@ -463,7 +501,7 @@ class HwpxReader:
     def read(self) -> Doc:
         names = set(self.z.namelist())
         if "Preview/PrvText.txt" in names:
-            raw = self.z.read("Preview/PrvText.txt")
+            raw = _zip_read(self.z, "Preview/PrvText.txt")
             for enc in ("utf-8", "utf-16"):
                 try:
                     self.doc.preview_text = raw.decode(enc)
@@ -471,17 +509,19 @@ class HwpxReader:
                 except UnicodeDecodeError:
                     continue
         try:
-            hpf = ET.fromstring(self.z.read("Contents/content.hpf"))
+            hpf = _xml(_zip_read(self.z, "Contents/content.hpf"))
             for m in hpf.iter():
                 if _local(m.tag) == "title" and (m.text or "").strip():
                     self.doc.meta["title"] = m.text.strip()
+        except Unsupported:
+            raise
         except Exception:
             pass
         secs = self._sections()
         if not secs:
             raise Unsupported("HWPX 패키지에 본문 섹션(Contents/sectionN.xml)이 없습니다.")
         for s in secs:
-            root = ET.fromstring(self.z.read(s))
+            root = _xml(_zip_read(self.z, s))
             self.doc.blocks.extend(self._paras(root))
         self.doc.meta["sections"] = len(secs)
         self.doc.images = sorted(n.split("/", 1)[1] for n in names if n.startswith("BinData/"))
@@ -684,7 +724,8 @@ def to_markdown(doc: Doc) -> str:
     if doc.notes:
         out.append("")
         for i, body in enumerate(doc.notes, 1):
-            parts = [_norm(x.text) if isinstance(x, Para) else _table_html(x).replace("\n", "") for x in body]
+            parts = [_norm(x.text.replace("\n", " ")) if isinstance(x, Para) else _table_html(x).replace("\n", "")
+                     for x in body]
             note = " ".join(p for p in parts if p)
             out.append(f"[^{i}]: {note}")
     md = "\n".join(out)
@@ -712,7 +753,9 @@ def preview_coverage(preview: str, md: str) -> Optional[float]:
         return None
     if len(preview) >= PRVTEXT_CAP:
         chunks = chunks[:-1] or chunks  # cut mid-chunk at the size limit; a shorter preview is complete
-    hit = sum(1 for c in chunks if c in body)
+    # A line repeated in the preview must appear that many times in the output.
+    need = collections.Counter(chunks)
+    hit = sum(min(k, body.count(c)) for c, k in need.items())
     return round(hit / len(chunks), 3)
 
 
@@ -797,7 +840,7 @@ def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
         for p in r.cfb.list("BinData/"):
             raw = r.cfb.read(p)
             try:
-                raw = zlib.decompress(raw, -15) if r.compressed else raw
+                raw = _inflate(raw, p) if r.compressed else raw
             except zlib.error:
                 pass  # some BinData entries are stored uncompressed
             dst = _safe_dest(outdir, p)
@@ -814,7 +857,7 @@ def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
                 if dst is None:
                     continue
                 with open(dst, "wb") as f:
-                    f.write(z.read(n))
+                    f.write(_zip_read(z, n))
                 written.append(dst)
     return written
 
@@ -867,7 +910,7 @@ def cmd_render(a) -> int:
     elif kind == "hwpx":
         z = zipfile.ZipFile(a.file)
         n = next((n for n in z.namelist() if n.startswith("Preview/PrvImage")), None)
-        img = z.read(n) if n else None
+        img = _zip_read(z, n) if n else None
     if not img:
         sys.stderr.write("rhwp가 없고 문서에 미리보기 이미지도 없습니다.\n")
         return 3

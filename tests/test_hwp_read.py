@@ -205,6 +205,53 @@ class Fixtures(unittest.TestCase):
         cut = ("x" * 40 + "\n") * 24 + "partial chunk cut he"  # at the ~1K PrvText cap
         self.assertEqual(h.preview_coverage(cut, ("x" * 40 + "\n") * 24), 1.0)
 
+    def _limit(self, n):
+        orig = h.MAX_PART_BYTES
+        h.MAX_PART_BYTES = n
+        self.addCleanup(setattr, h, "MAX_PART_BYTES", orig)
+
+    def test_hwpx_oversized_part_rejected(self):
+        self._limit(1000)  # section0.xml is far larger than this
+        with self.assertRaises(h.Unsupported):
+            h.load(os.path.join(FIX, "sk-openinno-form.hwpx"))
+
+    def test_hwp5_oversized_stream_rejected(self):
+        self._limit(1000)  # BodyText/Section0 inflates far beyond this
+        with self.assertRaises(h.Unsupported):
+            h.load(os.path.join(FIX, "e-phi-design.hwp"))
+
+    def test_hwpx_dtd_rejected(self):
+        src = os.path.join(FIX, "sk-openinno-form.hwpx")
+        p = os.path.join(self.tmp, "dtd.hwpx")
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(p, "w") as zout:
+            for info in zin.infolist():
+                data = zin.read(info.filename)
+                if info.filename == "Contents/section0.xml":
+                    data = b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]>' + data.split(b"?>", 1)[1]
+                zout.writestr(info, data)
+        with self.assertRaises(h.Unsupported):
+            h.load(p)
+
+    def test_hwp5_without_body_section_rejected(self):
+        data = bytearray(_read(os.path.join(FIX, "e-phi-design.hwp")))
+        name = "Section0".encode("utf-16-le")
+        i = data.find(name)
+        self.assertGreater(i, 0)
+        data[i:i + len(name)] = "SectionX".encode("utf-16-le")
+        p = os.path.join(self.tmp, "nobody.hwp")
+        with open(p, "wb") as f:
+            f.write(data)
+        with self.assertRaises(h.Unsupported):
+            h.load(p)
+
+    def test_preview_coverage_counts_duplicate_lines(self):
+        self.assertLess(h.preview_coverage("repeated line\nrepeated line\nother line\n",
+                                           "repeated line other line"), 1.0)
+
+    def test_multiline_note_stays_in_definition(self):
+        doc = h.Doc("hwp5", blocks=[h.Para("body[^1]")], notes=[[h.Para("first\nsecond")]])
+        self.assertIn("[^1]: first second", h.to_markdown(doc))
+
     def test_cli_exit_codes(self):
         r = subprocess.run([sys.executable, SCRIPT, "extract", os.path.join(FIX, "e-phi-design.hwp")],
                            capture_output=True, text=True)

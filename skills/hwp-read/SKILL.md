@@ -31,7 +31,8 @@ so it works in any sandbox. All paths below are relative to this SKILL.md's dire
    - `warnings` — surface every warning to the user in one line.
 
 3. **Exit codes**: `0` ok · `1` parse error (corrupt file) · `2` usage · `3` unsupported or
-   protected (배포용/암호 문서, HWP 3.x, HML) — relay the message, which says what to do ·
+   protected (배포용/암호 문서, HWP 3.x, HML, or a container refused as unsafe: no body section,
+   a DTD, or a part that inflates past the script's size cap) — relay the message, which says what to do ·
    `4` extracted but suspicious (see `preview_coverage`).
 
 4. **Render when layout matters** (filled-in forms, checkbox states, signature/seal areas,

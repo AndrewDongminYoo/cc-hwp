@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import zlib
 
 HERE = os.path.dirname(__file__)
 SCRIPT = os.path.join(HERE, "..", "skills", "hwp-read", "scripts", "hwp_read.py")
@@ -231,6 +232,17 @@ class Fixtures(unittest.TestCase):
                 zout.writestr(info, data)
         with self.assertRaises(h.Unsupported):
             h.load(p)
+
+    def test_utf16_dtd_rejected(self):
+        doc = '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE r [<!ENTITY a "aaaa">]><r>&a;</r>'
+        with self.assertRaises(h.Unsupported):
+            h._xml(doc.encode("utf-16"))
+
+    def test_truncated_deflate_stream_is_a_parse_error(self):
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"complete paragraph text " * 20) + c.flush()
+        with self.assertRaises(ValueError):
+            h._inflate(raw[: len(raw) // 2], "BodyText/Section0")
 
     def test_hwp5_without_body_section_rejected(self):
         data = bytearray(_read(os.path.join(FIX, "e-phi-design.hwp")))

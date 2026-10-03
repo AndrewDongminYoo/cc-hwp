@@ -30,6 +30,7 @@ import sys
 import zipfile
 import zlib
 import xml.etree.ElementTree as ET
+import xml.parsers.expat
 from dataclasses import dataclass, field
 from typing import List, Optional, Union
 
@@ -53,6 +54,8 @@ def _inflate(raw: bytes, what: str) -> bytes:
     out = d.decompress(raw, MAX_PART_BYTES)
     if d.unconsumed_tail:
         raise _too_large(what)
+    if not d.eof:
+        raise ValueError(f"{what}: 압축 스트림이 중간에 끊겼습니다 (손상된 문서).")
     return out
 
 
@@ -65,9 +68,18 @@ def _zip_read(z: zipfile.ZipFile, name: str) -> bytes:
 
 
 def _xml(data: bytes):
-    """OWPML never declares a DTD; refusing one closes entity-expansion attacks."""
-    if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+    """OWPML never declares a DTD; refusing one closes entity-expansion attacks.
+    expat detects the document encoding itself, so this also holds for UTF-16 input."""
+    def refuse(*_):
         raise Unsupported("HWPX XML에 DTD/엔티티 선언이 있습니다. 정상 HWPX에는 없는 구조라 읽지 않습니다.")
+
+    p = xml.parsers.expat.ParserCreate()
+    p.StartDoctypeDeclHandler = refuse
+    p.EntityDeclHandler = refuse
+    try:
+        p.Parse(data, True)
+    except xml.parsers.expat.ExpatError as e:
+        raise ET.ParseError(str(e))
     return ET.fromstring(data)
 
 
@@ -841,7 +853,7 @@ def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
             raw = r.cfb.read(p)
             try:
                 raw = _inflate(raw, p) if r.compressed else raw
-            except zlib.error:
+            except (zlib.error, ValueError):
                 pass  # some BinData entries are stored uncompressed
             dst = _safe_dest(outdir, p)
             if dst is None:

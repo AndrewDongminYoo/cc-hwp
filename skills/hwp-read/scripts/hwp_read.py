@@ -211,6 +211,17 @@ def _tree(recs: List[Rec]) -> List[Rec]:
     return roots
 
 
+def _utf16_char(w, i: int):
+    """One character from UTF-16 code units at w[i]: (text, units consumed).
+    Surrogate pairs combine into one code point; a lone surrogate becomes U+FFFD."""
+    ch = w[i]
+    if 0xD800 <= ch <= 0xDBFF and i + 1 < len(w) and 0xDC00 <= w[i + 1] <= 0xDFFF:
+        return chr(0x10000 + ((ch - 0xD800) << 10) + (w[i + 1] - 0xDC00)), 2
+    if 0xD800 <= ch <= 0xDFFF:
+        return "�", 1
+    return chr(ch), 1
+
+
 def _ctrl_id(data: bytes) -> str:
     return data[:4][::-1].decode("latin-1") if len(data) >= 4 else ""
 
@@ -270,8 +281,9 @@ class Hwp5Reader:
         while i < len(w):
             ch = w[i]
             if ch >= 32:
-                buf.append(chr(ch))
-                i += 1
+                s, n = _utf16_char(w, i)
+                buf.append(s)
+                i += n
                 continue
             if ch in EXTENDED_CTRL:
                 if ci < len(ctrls):
@@ -405,6 +417,8 @@ class HwpxReader:
         mime = self.z.read("mimetype").decode(errors="replace").strip() if "mimetype" in names else ""
         if mime and "hwp" not in mime:
             raise Unsupported(f"ZIP 컨테이너지만 HWPX가 아닙니다 (mimetype={mime})")
+        if not mime and "Contents/content.hpf" not in names:
+            raise Unsupported("ZIP 컨테이너지만 HWPX 패키지 표지(mimetype, Contents/content.hpf)가 없습니다.")
         manifest = self.z.read("META-INF/manifest.xml").decode(errors="replace") if "META-INF/manifest.xml" in names else ""
         if "encryption-data" in manifest:
             raise Unsupported("암호화된 HWPX 문서입니다.")
@@ -443,6 +457,8 @@ class HwpxReader:
         except Exception:
             pass
         secs = self._sections()
+        if not secs:
+            raise Unsupported("HWPX 패키지에 본문 섹션(Contents/sectionN.xml)이 없습니다.")
         for s in secs:
             root = ET.fromstring(self.z.read(s))
             self.doc.blocks.extend(self._paras(root))
@@ -729,6 +745,19 @@ def load(path: str) -> Doc:
     raise Unsupported("HWP/HWPX 시그니처가 아닙니다 (확장자와 무관하게 내용으로 판별함).")
 
 
+def _safe_dest(outdir: str, member: str) -> Optional[str]:
+    """Destination for an embedded file, or None if its name would leave outdir.
+    Container entry names come from the document and must not be trusted as paths."""
+    base = member.replace("\\", "/").rsplit("/", 1)[-1]
+    if base in ("", ".", ".."):
+        return None
+    dst = os.path.join(outdir, base)
+    root = os.path.realpath(outdir)
+    if not os.path.realpath(dst).startswith(root + os.sep):
+        return None
+    return dst
+
+
 def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
     os.makedirs(outdir, exist_ok=True)
     with open(path, "rb") as f:
@@ -742,7 +771,9 @@ def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
                 raw = zlib.decompress(raw, -15) if r.compressed else raw
             except zlib.error:
                 pass  # some BinData entries are stored uncompressed
-            dst = os.path.join(outdir, p.split("/", 1)[1])
+            dst = _safe_dest(outdir, p)
+            if dst is None:
+                continue
             with open(dst, "wb") as f:
                 f.write(raw)
             written.append(dst)
@@ -750,7 +781,9 @@ def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
         z = zipfile.ZipFile(path)
         for n in z.namelist():
             if n.startswith("BinData/"):
-                dst = os.path.join(outdir, n.split("/", 1)[1])
+                dst = _safe_dest(outdir, n)
+                if dst is None:
+                    continue
                 with open(dst, "wb") as f:
                     f.write(z.read(n))
                 written.append(dst)

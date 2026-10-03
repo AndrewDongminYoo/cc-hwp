@@ -3,9 +3,11 @@ import collections
 import html
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import unittest
 import zipfile
 
@@ -62,6 +64,10 @@ def _raw_hwpx_chars(path):
 
 
 class Fixtures(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
     def check(self, name, raw_fn, fmt, min_tables):
         p = os.path.join(FIX, name)
         doc = h.load(p)
@@ -95,6 +101,37 @@ class Fixtures(unittest.TestCase):
         struct.pack_into("<I", data, sig + 36, flags | 0x04)
         with self.assertRaises(h.Unsupported):
             h.Hwp5Reader(bytes(data))
+
+    def test_zip_without_hwpx_markers_rejected(self):
+        p = os.path.join(self.tmp, "plain.zip")
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("readme.txt", "not a hangul document")
+        with self.assertRaises(h.Unsupported):
+            h.load(p)
+
+    def test_images_dir_cannot_escape(self):
+        src = os.path.join(FIX, "sk-openinno-form.hwpx")
+        p = os.path.join(self.tmp, "evil.hwpx")
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(p, "w") as zout:
+            for info in zin.infolist():
+                zout.writestr(info, zin.read(info.filename))
+            zout.writestr("BinData/../../escaped.bin", b"payload")
+        outdir = os.path.join(self.tmp, "a", "b", "images")
+        written = h.save_images(p, h.load(p), outdir)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "a", "escaped.bin")))
+        root = os.path.realpath(outdir)
+        for w in written:
+            self.assertTrue(os.path.realpath(w).startswith(root + os.sep), w)
+
+    def test_utf16_surrogate_pairs_combined(self):
+        units = [0xAC00, 0xD83D, 0xDE00, 0x0041, 0xD800]  # 가, 😀 as a pair, A, lone high surrogate
+        out, i = [], 0
+        while i < len(units):
+            s, n = h._utf16_char(units, i)
+            out.append(s)
+            i += n
+        self.assertEqual("".join(out), "가😀A�")
+        "".join(out).encode("utf-8")  # must not raise UnicodeEncodeError
 
     def test_cli_exit_codes(self):
         r = subprocess.run([sys.executable, SCRIPT, "extract", os.path.join(FIX, "e-phi-design.hwp")],

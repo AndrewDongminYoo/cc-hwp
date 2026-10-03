@@ -122,6 +122,7 @@ class CFB:
             mf = self._chain(first_mfat)
             self.minifat = list(struct.unpack_from(f"<{len(mf) // 4}I", mf))
         self.paths = {}
+        self._seen: set = set()
         self._walk(root["child"], "")
 
     def _sec(self, n: int) -> bytes:
@@ -148,8 +149,9 @@ class CFB:
         stack = [idx]
         while stack:
             i = stack.pop()
-            if i >= len(self.entries) or i >= self.ENDOFCHAIN or depth > 32:
+            if i >= len(self.entries) or i >= self.ENDOFCHAIN or depth > 32 or i in self._seen:
                 continue
+            self._seen.add(i)  # malformed sibling/child links can form cycles
             e = self.entries[i]
             path = prefix + e["name"]
             self.paths[path] = e
@@ -383,17 +385,20 @@ def _find_all_lists(r: Rec) -> List[List[Rec]]:
 
     def walk(node: Rec):
         sib = node.children
-        for idx, ch in enumerate(sib):
-            if ch.tag == TAG_LIST_HEADER:
+        idx = 0
+        while idx < len(sib):
+            if sib[idx].tag == TAG_LIST_HEADER:
                 run = []
-                for nxt in sib[idx + 1:]:
-                    if nxt.tag != TAG_PARA_HEADER:
-                        break
-                    run.append(nxt)
+                idx += 1
+                while idx < len(sib) and sib[idx].tag == TAG_PARA_HEADER:
+                    run.append(sib[idx])
+                    idx += 1
                 if run:
                     found.append(run)
+                # Don't descend into the run: _paras handles tables nested in it.
             else:
-                walk(ch)
+                walk(sib[idx])
+                idx += 1
 
     walk(r)
     return found
@@ -407,6 +412,18 @@ HC = "{http://www.hancom.co.kr/hwpml/2011/core}"
 
 def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
+
+
+def _outer_sublists(el) -> list:
+    """hp:subList elements under el that are not nested inside another subList;
+    nested ones (table cells, inner drawings) are reached when the outer list is parsed."""
+    out = []
+    for ch in el:
+        if ch.tag == HP + "subList":
+            out.append(ch)
+        else:
+            out.extend(_outer_sublists(ch))
+    return out
 
 
 class HwpxReader:
@@ -513,7 +530,7 @@ class HwpxReader:
                     continue
                 else:
                     # drawing objects (rect, ellipse, container, ...) may hold text boxes
-                    subs = [s for s in el.iter(HP + "subList")]
+                    subs = _outer_sublists(el)
                     if subs:
                         flush()
                         for sub in subs:
@@ -660,7 +677,8 @@ def to_markdown(doc: Doc) -> str:
     if doc.notes:
         out.append("")
         for i, body in enumerate(doc.notes, 1):
-            note = " ".join(_norm(x.text) for x in body if isinstance(x, Para))
+            parts = [_norm(x.text) if isinstance(x, Para) else _table_html(x).replace("\n", "") for x in body]
+            note = " ".join(p for p in parts if p)
             out.append(f"[^{i}]: {note}")
     md = "\n".join(out)
     return re.sub(r"\n{3,}", "\n\n", md).strip() + "\n"

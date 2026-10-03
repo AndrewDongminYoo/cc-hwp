@@ -136,6 +136,47 @@ class Fixtures(unittest.TestCase):
         self.assertEqual("".join(out), "가😀A�")
         "".join(out).encode("utf-8")  # must not raise UnicodeEncodeError
 
+    def test_cfb_directory_cycle_terminates(self):
+        data = bytearray(_read(os.path.join(FIX, "e-phi-design.hwp")))
+        ss = 1 << struct.unpack_from("<H", data, 0x1E)[0]
+        first_dir = struct.unpack_from("<I", data, 0x30)[0]
+        entry1 = (first_dir + 1) * ss + 128
+        struct.pack_into("<I", data, entry1 + 68, 1)  # entry 1's left sibling -> itself
+        p = os.path.join(self.tmp, "cycle.hwp")
+        with open(p, "wb") as f:
+            f.write(data)
+        r = subprocess.run([sys.executable, SCRIPT, "info", p], capture_output=True, text=True, timeout=20)
+        self.assertIn(r.returncode, (0, 1, 3), r.stderr)
+
+    def test_hwpx_textbox_with_table_not_duplicated(self):
+        xml = (
+            '<hp:p xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"><hp:run><hp:rect><hp:drawText>'
+            '<hp:subList><hp:p><hp:run><hp:tbl rowCnt="1" colCnt="1"><hp:tr><hp:tc>'
+            '<hp:cellAddr colAddr="0" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/>'
+            '<hp:subList><hp:p><hp:run><hp:t>CELLTEXT</hp:t></hp:run></hp:p></hp:subList>'
+            '</hp:tc></hp:tr></hp:tbl></hp:run></hp:p></hp:subList>'
+            '</hp:drawText></hp:rect></hp:run></hp:p>'
+        )
+        r = h.HwpxReader.__new__(h.HwpxReader)
+        r.doc = h.Doc("hwpx")
+        r.doc.blocks = r._para(h.ET.fromstring(xml))
+        self.assertEqual(h.to_markdown(r.doc).count("CELLTEXT"), 1)
+
+    def test_hwp5_textbox_with_table_not_duplicated(self):
+        def rec(tag, level, children=()):
+            return h.Rec(tag, level, b"", list(children))
+        cell_para = rec(h.TAG_PARA_HEADER, 4)
+        table = rec(h.TAG_CTRL_HEADER, 3, [rec(h.TAG_LIST_HEADER, 4), cell_para])
+        box_para = rec(h.TAG_PARA_HEADER, 2, [table])
+        gso = rec(h.TAG_CTRL_HEADER, 1, [rec(h.TAG_LIST_HEADER, 2), box_para])
+        lists = h._find_all_lists(gso)
+        self.assertEqual(lists, [[box_para]])
+
+    def test_note_with_table_keeps_cells(self):
+        t = h.Table(1, 2, [h.Cell(0, 0, 1, 1, [h.Para("NOTECELL")]), h.Cell(0, 1, 1, 1, [h.Para("x")])])
+        doc = h.Doc("hwp5", blocks=[h.Para("body[^1]")], notes=[[h.Para("see"), t]])
+        self.assertIn("NOTECELL", h.to_markdown(doc))
+
     def test_cli_exit_codes(self):
         r = subprocess.run([sys.executable, SCRIPT, "extract", os.path.join(FIX, "e-phi-design.hwp")],
                            capture_output=True, text=True)

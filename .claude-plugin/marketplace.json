@@ -1,0 +1,18 @@
+{
+  "name": "cc-hwp",
+  "owner": {
+    "name": "Dongmin Yu",
+    "url": "https://github.com/AndrewDongminYoo"
+  },
+  "metadata": {
+    "description": "Korean Hangul (.hwp/.hwpx) document tools for Claude"
+  },
+  "plugins": [
+    {
+      "name": "cc-hwp",
+      "source": "./",
+      "description": "Read Korean Hangul .hwp/.hwpx documents as Markdown without Hancom Office or PDF conversion.",
+      "version": "0.1.0"
+    }
+  ]
+}

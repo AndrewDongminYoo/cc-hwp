@@ -641,9 +641,12 @@ def _table_html(t: Table) -> str:
     for c in sorted(t.cells, key=lambda c: (c.row, c.col)):
         rows.setdefault(c.row, []).append(c)
     out = ["<table>"]
-    for r in sorted(rows):
+    last = max(c.row + c.rowspan - 1 for c in t.cells) if t.cells else -1
+    # A row fully covered by rowspans has no starting cell but still needs its <tr>,
+    # or the cells of later rows shift into the merged area.
+    for r in range(last + 1):
         tds = []
-        for c in rows[r]:
+        for c in rows.get(r, []):
             attrs = (f' rowspan="{c.rowspan}"' if c.rowspan > 1 else "") + \
                     (f' colspan="{c.colspan}"' if c.colspan > 1 else "")
             tds.append(f"<td{attrs}>{_cell_text(c.blocks, True)}</td>")
@@ -690,6 +693,9 @@ def _squash(s: str) -> str:
     return re.sub(r"[\s 　<>|`*#>\-]+", "", html.unescape(re.sub(r"<[^>]+>", "", s)))
 
 
+PRVTEXT_CAP = 1000  # Hancom truncates PrvText at about 1K characters (1,023 in both fixtures)
+
+
 def preview_coverage(preview: str, md: str) -> Optional[float]:
     """Share of the embedded preview text (PrvText, written by the authoring app)
     that also appears in our extraction. The preview is a truncated, independent
@@ -700,7 +706,8 @@ def preview_coverage(preview: str, md: str) -> Optional[float]:
     chunks = [c for c in (_squash(x) for x in re.split(r"[<>\r\n]+", preview)) if len(c) >= 4]
     if not chunks:
         return None
-    chunks = chunks[:-1] or chunks  # PrvText is cut mid-chunk at its size limit
+    if len(preview) >= PRVTEXT_CAP:
+        chunks = chunks[:-1] or chunks  # cut mid-chunk at the size limit; a shorter preview is complete
     hit = sum(1 for c in chunks if c in body)
     return round(hit / len(chunks), 3)
 

@@ -177,6 +177,16 @@ class Fixtures(unittest.TestCase):
         doc = h.Doc("hwp5", blocks=[h.Para("body[^1]")], notes=[[h.Para("see"), t]])
         self.assertIn("NOTECELL", h.to_markdown(doc))
 
+    def test_html_table_keeps_rows_covered_by_rowspan(self):
+        t = h.Table(3, 2, [h.Cell(0, 0, 2, 1, [h.Para("A")]), h.Cell(0, 1, 2, 1, [h.Para("B")]),
+                           h.Cell(2, 0, 1, 1, [h.Para("C")]), h.Cell(2, 1, 1, 1, [h.Para("D")])])
+        self.assertEqual(h._table_html(t).count("<tr>"), 3)
+
+    def test_preview_coverage_checks_last_line_of_untruncated_preview(self):
+        self.assertLess(h.preview_coverage("present text\nmissing text\n", "present text"), 1.0)
+        cut = ("x" * 40 + "\n") * 24 + "partial chunk cut he"  # at the ~1K PrvText cap
+        self.assertEqual(h.preview_coverage(cut, ("x" * 40 + "\n") * 24), 1.0)
+
     def test_cli_exit_codes(self):
         r = subprocess.run([sys.executable, SCRIPT, "extract", os.path.join(FIX, "e-phi-design.hwp")],
                            capture_output=True, text=True)

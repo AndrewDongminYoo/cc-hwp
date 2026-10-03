@@ -148,6 +148,24 @@ class Fixtures(unittest.TestCase):
         r = subprocess.run([sys.executable, SCRIPT, "info", p], capture_output=True, text=True, timeout=20)
         self.assertIn(r.returncode, (0, 1, 3), r.stderr)
 
+    def test_cfb_difat_cycle_is_bounded(self):
+        data = bytearray(_read(os.path.join(FIX, "e-phi-design.hwp")))
+        ss = 1 << struct.unpack_from("<H", data, 0x1E)[0]
+        k = len(data) // ss - 2  # last sector index
+        struct.pack_into("<II", data, 0x44, k, 10000)  # first DIFAT sector, declared DIFAT count
+        struct.pack_into("<I", data, (k + 1) * ss + ss - 4, k)  # its next-DIFAT link points to itself
+        calls = []
+        orig = h.CFB._sec
+
+        def counting(self, n):
+            calls.append(n)
+            return orig(self, n)
+
+        h.CFB._sec = counting
+        self.addCleanup(setattr, h.CFB, "_sec", orig)
+        h.CFB(bytes(data))
+        self.assertLess(len(calls), 1000)
+
     def test_hwpx_textbox_with_table_not_duplicated(self):
         xml = (
             '<hp:p xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"><hp:run><hp:rect><hp:drawText>'

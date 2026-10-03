@@ -92,9 +92,13 @@ class CFB:
         self.mini_cutoff, first_mfat, _n_mfat, first_difat, n_difat = struct.unpack_from("<IIIII", data, 0x38)
         difat = list(struct.unpack_from("<109I", data, 0x4C))
         s = first_difat
-        for _ in range(n_difat):
-            if s >= self.ENDOFCHAIN:
+        n_secs = len(data) // self.ss - 1
+        seen: set = set()
+        # The declared count is untrusted: stop at a repeated or out-of-file sector.
+        for _ in range(min(n_difat, n_secs)):
+            if s >= n_secs or s in seen:
                 break
+            seen.add(s)
             vals = struct.unpack_from(f"<{self.ss // 4}I", self._sec(s))
             difat.extend(vals[:-1])
             s = vals[-1]

@@ -40,13 +40,14 @@ Everything lives in `skills/hwp-read/scripts/hwp_read.py`; the pipeline is:
 ```plaintext
 detect(bytes) ─┬─ hwp5 → CFB → Hwp5Reader ─┐
                └─ hwpx → zipfile+ET → HwpxReader ─┴→ Doc IR ─┬→ to_markdown() → stats() / preview_coverage()
-                                                             └→ to_docx()  (convert --to docx)
+                                                             └→ write_docx()  (convert --to docx)
 ```
 
 - **IR** (`Doc`, `Para`, `Table`, `Cell`) is the seam between the two readers and the renderer. A new input format only needs a reader that produces this IR.
 - **HWP 5.0 reader:** `BodyText/SectionN` streams are raw-deflate compressed when FileHeader flag bit 0 is set. Records are flattened and rebuilt into a tree by their `level` field (`_tree`). Inside `PARA_TEXT`, extended control characters (`EXTENDED_CTRL`) occupy 8 UTF-16 units and map **in order** to the paragraph's `CTRL_HEADER` children: `_para` keeps a cursor `ci` across them, so skipping or reordering control handling desynchronizes every later table or footnote in that paragraph.
 - **HWPX reader:** section order comes from the `content.hpf` spine, falling back to sorted `Contents/sectionN.xml`. Drawing objects with `hp:subList` children are treated as text boxes.
-- **DOCX** is written from the IR, not from the Markdown: Markdown flattens layout boxes, so going through it loses tables. Every `Table` becomes a `w:tbl`; merges map to `gridSpan` and `vMerge`, and a vertical-merge continuation cell repeats its start cell's `gridSpan`.
+- **DOCX** is written from the IR, not from the Markdown: Markdown flattens layout boxes, so going through it loses tables. Every `Table` becomes a `w:tbl`; merges map to `gridSpan` and `vMerge`, and a vertical-merge continuation cell repeats its start cell's `gridSpan`. `write_docx` streams `word/document.xml` one top-level block at a time; do not reintroduce a whole-document string.
+- **Resource caps for hostile documents:** `_Budget` bounds decompressed bytes per part and per document; `_GridBudget` bounds the table grid slots any renderer materializes (pipe-table lists, HTML rows, DOCX slots). A new renderer that builds a grid from cell addresses or spans must charge `_GridBudget` before building it.
 - **Table rendering** has three outcomes, chosen in `_table_md`: one-row/one-column tables without nesting are layout boxes and are flattened to text; simple grids become pipe tables; any merged or nested table becomes HTML with `rowspan`/`colspan`.
 - **Self-check:** `preview_coverage` compares the output against `PrvText`, the authoring app's own preview of roughly the first 1–2K characters. Below `0.9`, `extract` still writes output but exits `4`.
 - **`render`:** delegates to the `rhwp` CLI (github.com/edwardkim/rhwp, the engine behind the HOP viewer) when it is on PATH; otherwise it writes the embedded first-page thumbnail. Verified against rhwp v0.8.6 on 2026-10-03: `export-pdf <file> -o <file.pdf> --json -p N` renders and prints a JSON manifest. rhwp also ships editing commands (`rhwp edit replace-text`, `set-cell`, `fill-fields`, …); run `rhwp --help` for the current surface rather than relying on a list here.

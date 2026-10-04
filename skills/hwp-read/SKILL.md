@@ -32,7 +32,8 @@ so it works in any sandbox. All paths below are relative to this SKILL.md's dire
 
 3. **Exit codes**: `0` ok · `1` parse error (corrupt file) · `2` usage · `3` unsupported or
    protected (배포용/암호 문서, HWP 3.x, HML, or a container refused as unsafe: no body section,
-   a DTD, or content that inflates past the script's per-part or per-document size caps) — relay the message, which says what to do ·
+   a DTD, content that inflates past the script's per-part or per-document size caps, or tables
+   whose declared grid exceeds its cell cap) — relay the message, which says what to do ·
    `4` extracted but suspicious (see `preview_coverage`).
 
 4. **Render when layout matters** (filled-in forms, checkbox states, signature/seal areas,

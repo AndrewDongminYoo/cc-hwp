@@ -1,6 +1,7 @@
 """Regression tests: run with `python3 -m unittest discover tests` (stdlib only)."""
 import argparse
 import collections
+import contextlib
 import html
 import io
 import os
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tracemalloc
 import unittest
 import zipfile
 import zlib
@@ -205,7 +207,7 @@ class Fixtures(unittest.TestCase):
     def test_html_table_keeps_rows_covered_by_rowspan(self):
         t = h.Table(3, 2, [h.Cell(0, 0, 2, 1, [h.Para("A")]), h.Cell(0, 1, 2, 1, [h.Para("B")]),
                            h.Cell(2, 0, 1, 1, [h.Para("C")]), h.Cell(2, 1, 1, 1, [h.Para("D")])])
-        self.assertEqual(h._table_html(t).count("<tr>"), 3)
+        self.assertEqual(h._table_html(t, h._GridBudget()).count("<tr>"), 3)
 
     def test_preview_coverage_checks_last_line_of_untruncated_preview(self):
         self.assertLess(h.preview_coverage("present text\nmissing text\n", "present text"), 1.0)
@@ -455,11 +457,40 @@ class Fixtures(unittest.TestCase):
             self.assertEqual(tc[-1].tag, f"{W}p")  # Word rejects a cell whose last child is not a paragraph
 
     def test_docx_refuses_oversized_grids(self):
-        big = h.MAX_DOCX_GRID_CELLS + 1
+        big = h.MAX_GRID_CELLS + 1
         for cell in (h.Cell(0, 0, 1, big, [h.Para("x")]), h.Cell(0, 0, big, 1, [h.Para("x")])):
             doc = h.Doc("hwpx", blocks=[h.Table(1, 1, [cell])])
             with self.assertRaises(h.Unsupported):
                 h.to_docx(doc)
+
+    def _convert(self, out):
+        with contextlib.redirect_stdout(io.StringIO()):  # keep the JSON report out of the test log
+            return h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"),
+                                                    output=out, to="docx"))
+
+    def test_markdown_refuses_oversized_simple_grid(self):
+        far = h.MAX_GRID_CELLS  # two rows, so a simple table, not a flattened layout box
+        t = h.Table(2, far + 1, [h.Cell(0, 0, 1, 1, [h.Para("a")]), h.Cell(1, far, 1, 1, [h.Para("b")])])
+        with self.assertRaises(h.Unsupported):
+            h.to_markdown(h.Doc("hwpx", blocks=[t]))
+
+    def test_markdown_refuses_oversized_html_rows(self):
+        far = h.MAX_GRID_CELLS + 1  # merged and two starting rows: HTML, one <tr> per grid row
+        t = h.Table(far, 2, [h.Cell(0, 0, far, 1, [h.Para("a")]), h.Cell(0, 1, 1, 1, [h.Para("b")]),
+                             h.Cell(1, 1, 1, 1, [h.Para("c")])])
+        with self.assertRaises(h.Unsupported):
+            h.to_markdown(h.Doc("hwpx", blocks=[t]))
+
+    def test_docx_streams_instead_of_holding_copies(self):
+        text = "&" * 5000  # escapes to 25,000 characters per paragraph
+        doc = h.Doc("hwpx", blocks=[h.Para(text) for _ in range(2000)])  # ~50 MB of escaped XML
+        tracemalloc.start()
+        try:
+            h.to_docx(doc)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 20 * 1024 * 1024, f"peak {peak} bytes")
 
     def test_convert_refuses_to_overwrite_its_source(self):
         src = os.path.join(self.tmp, "report.docx")  # an HWPX named like the default output
@@ -483,11 +514,11 @@ class Fixtures(unittest.TestCase):
         out = os.path.join(self.tmp, "existing.docx")
         with open(out, "wb") as f:
             f.write(b"previous result")
-        orig = h.MAX_DOCX_GRID_CELLS
-        h.MAX_DOCX_GRID_CELLS = 1  # make the conversion fail after parsing succeeds
-        self.addCleanup(setattr, h, "MAX_DOCX_GRID_CELLS", orig)
+        orig = h.MAX_GRID_CELLS
+        h.MAX_GRID_CELLS = 1  # make the conversion fail after parsing succeeds
+        self.addCleanup(setattr, h, "MAX_GRID_CELLS", orig)
         with self.assertRaises(h.Unsupported):
-            h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"), output=out, to="docx"))
+            self._convert(out)
         self.assertEqual(_read(out), b"previous result")
 
     def test_failed_write_keeps_existing_output(self):
@@ -506,7 +537,7 @@ class Fixtures(unittest.TestCase):
 
     def test_convert_output_has_normal_permissions(self):
         out = os.path.join(self.tmp, "fresh.docx")
-        h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"), output=out, to="docx"))
+        self._convert(out)
         umask = os.umask(0)
         os.umask(umask)
         self.assertEqual(os.stat(out).st_mode & 0o777, 0o666 & ~umask)  # not mkstemp's 0600
@@ -516,7 +547,7 @@ class Fixtures(unittest.TestCase):
         with open(out, "wb") as f:
             f.write(b"old")
         os.chmod(out, 0o600)
-        h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"), output=out, to="docx"))
+        self._convert(out)
         self.assertEqual(os.stat(out).st_mode & 0o777, 0o600)
 
     def test_docx_output_is_deterministic(self):
@@ -531,9 +562,9 @@ class Fixtures(unittest.TestCase):
             h.to_docx(h.Doc("hwpx", blocks=[h.Table(500, 1, dup)]))
 
     def test_empty_tables_are_charged_to_the_grid(self):
-        orig = h.MAX_DOCX_GRID_CELLS
-        h.MAX_DOCX_GRID_CELLS = 3
-        self.addCleanup(setattr, h, "MAX_DOCX_GRID_CELLS", orig)
+        orig = h.MAX_GRID_CELLS
+        h.MAX_GRID_CELLS = 3
+        self.addCleanup(setattr, h, "MAX_GRID_CELLS", orig)
         doc = h.Doc("hwpx", blocks=[h.Table(0, 0, []) for _ in range(4)])
         with self.assertRaises(h.Unsupported):
             h.to_docx(doc)

@@ -47,6 +47,21 @@ class Unsupported(Exception):
 MAX_PART_BYTES = 128 * 1024 * 1024
 MAX_DOC_BYTES = 256 * 1024 * 1024
 INFLATE_CHUNK = 1024 * 1024  # inflate in steps so work is charged even if zlib then fails
+# Cell addresses and spans come from the document too: one cell can claim row or column
+# 65,535 (HWP5) or any integer (HWPX), and every renderer that materializes a grid
+# (pipe tables, HTML rows, DOCX slots) would build it in full. Cap the slots per render.
+MAX_GRID_CELLS = 500_000
+
+
+class _GridBudget:
+    def __init__(self):
+        self.left = MAX_GRID_CELLS
+
+    def spend(self, nrows: int, ncols: int) -> None:
+        self.left -= nrows * ncols
+        if self.left < 0:
+            raise Unsupported(f"표 격자가 너무 큽니다 ({nrows}×{ncols}). 문서 전체 한도 "
+                              f"{MAX_GRID_CELLS}칸을 넘어 처리하지 않습니다.")
 
 
 def _inflate_bound(n_in: int) -> int:
@@ -703,7 +718,7 @@ def _norm(s: str) -> str:
     return re.sub(r"[ \t 　]+", " ", s).strip()
 
 
-def _cell_text(blocks: List[Block], html_mode: bool) -> str:
+def _cell_text(blocks: List[Block], html_mode: bool, grid: _GridBudget) -> str:
     parts = []
     for b in blocks:
         if isinstance(b, Para):
@@ -711,7 +726,7 @@ def _cell_text(blocks: List[Block], html_mode: bool) -> str:
             if t:
                 parts.append(html.escape(t) if html_mode else t.replace("|", "\\|"))
         else:
-            parts.append(_table_html(b))
+            parts.append(_table_html(b, grid))
     return ("<br>" if html_mode else " <br> ").join(parts)
 
 
@@ -730,37 +745,39 @@ def _is_layout(t: Table) -> bool:
     return nrows == 1 or ncols == 1
 
 
-def _flatten(t: Table) -> str:
-    texts = [_cell_text(c.blocks, False).replace(" <br> ", "\n")
+def _flatten(t: Table, grid: _GridBudget) -> str:
+    texts = [_cell_text(c.blocks, False, grid).replace(" <br> ", "\n")
              for c in sorted(t.cells, key=lambda c: (c.row, c.col))]
     texts = [x for x in texts if x.strip()]
     one_row = len({c.row for c in t.cells}) == 1
     return (" | " if one_row else "\n").join(texts)
 
 
-def _table_md(t: Table) -> str:
+def _table_md(t: Table, grid: _GridBudget) -> str:
     if not t.cells:
         return ""
     if _is_layout(t):
-        return _flatten(t)
+        return _flatten(t, grid)
     if not _simple(t) or t.rows < 2:
-        return _table_html(t)
+        return _table_html(t, grid)
     nrows = max(c.row for c in t.cells) + 1
     ncols = max(c.col for c in t.cells) + 1
-    grid = [["" for _ in range(ncols)] for _ in range(nrows)]
+    grid.spend(nrows, ncols)  # before the rows x cols list exists
+    cells = [["" for _ in range(ncols)] for _ in range(nrows)]
     for c in t.cells:
-        grid[c.row][c.col] = _cell_text(c.blocks, False)
-    lines = ["| " + " | ".join(grid[0]) + " |", "|" + "---|" * ncols]
-    lines += ["| " + " | ".join(r) + " |" for r in grid[1:]]
+        cells[c.row][c.col] = _cell_text(c.blocks, False, grid)
+    lines = ["| " + " | ".join(cells[0]) + " |", "|" + "---|" * ncols]
+    lines += ["| " + " | ".join(r) + " |" for r in cells[1:]]
     return "\n".join(lines)
 
 
-def _table_html(t: Table) -> str:
+def _table_html(t: Table, grid: _GridBudget) -> str:
     rows = {}
     for c in sorted(t.cells, key=lambda c: (c.row, c.col)):
         rows.setdefault(c.row, []).append(c)
     out = ["<table>"]
     last = max(c.row + c.rowspan - 1 for c in t.cells) if t.cells else -1
+    grid.spend(last + 1, 1)  # one <tr> per grid row, before any is emitted
     # A row fully covered by rowspans has no starting cell but still needs its <tr>,
     # or the cells of later rows shift into the merged area.
     for r in range(last + 1):
@@ -768,18 +785,19 @@ def _table_html(t: Table) -> str:
         for c in rows.get(r, []):
             attrs = (f' rowspan="{c.rowspan}"' if c.rowspan > 1 else "") + \
                     (f' colspan="{c.colspan}"' if c.colspan > 1 else "")
-            tds.append(f"<td{attrs}>{_cell_text(c.blocks, True)}</td>")
+            tds.append(f"<td{attrs}>{_cell_text(c.blocks, True, grid)}</td>")
         out.append("<tr>" + "".join(tds) + "</tr>")
     out.append("</table>")
     return "\n".join(out)
 
 
 def to_markdown(doc: Doc) -> str:
+    grid = _GridBudget()
     out: List[str] = []
     blank = 0
     for b in doc.blocks:
         if isinstance(b, Table):
-            md_t = _table_md(b)
+            md_t = _table_md(b, grid)
             if md_t.strip():
                 out.append(md_t)
                 out.append("")
@@ -799,8 +817,8 @@ def to_markdown(doc: Doc) -> str:
     if doc.notes:
         out.append("")
         for i, body in enumerate(doc.notes, 1):
-            parts = [_norm(x.text.replace("\n", " ")) if isinstance(x, Para) else _table_html(x).replace("\n", "")
-                     for x in body]
+            parts = [_norm(x.text.replace("\n", " ")) if isinstance(x, Para)
+                     else _table_html(x, grid).replace("\n", "") for x in body]
             note = " ".join(p for p in parts if p)
             out.append(f"[^{i}]: {note}")
     md = "\n".join(out)
@@ -816,20 +834,6 @@ _XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
 _TBL_BORDERS = "".join(f'<w:{s} w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
                        for s in ("top", "left", "bottom", "right", "insideH", "insideV"))
 _TEXT_WIDTH = 9638  # twips between A4 margins of 1134 twips (2 cm)
-# Spans come from the document: a single cell can declare a 65,535-column span, and the
-# DOCX grid materializes every slot. Cap the slots one document may produce.
-MAX_DOCX_GRID_CELLS = 500_000
-
-
-class _GridBudget:
-    def __init__(self):
-        self.left = MAX_DOCX_GRID_CELLS
-
-    def spend(self, nrows: int, ncols: int) -> None:
-        self.left -= nrows * ncols
-        if self.left < 0:
-            raise Unsupported(f"표 격자가 너무 큽니다 ({nrows}×{ncols}). 문서 전체 한도 "
-                              f"{MAX_DOCX_GRID_CELLS}칸을 넘어 DOCX로 변환하지 않습니다.")
 
 
 def _docx_para(text: str, indent: bool = False) -> str:
@@ -897,16 +901,18 @@ def _docx_table(t: Table, grid: _GridBudget) -> str:
             f"</w:tblPr><w:tblGrid>{grid}</w:tblGrid>{''.join(rows)}</w:tbl>")
 
 
-def to_docx(doc: Doc) -> bytes:
+def _zip_entry(name: str) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))  # fixed: same input, same bytes
+    info.compress_type = zipfile.ZIP_DEFLATED
+    return info
+
+
+def write_docx(doc: Doc, f) -> None:
+    """Write the DOCX package to a binary file object. document.xml is streamed one
+    top-level block at a time, so only the largest block is held as text, not the document."""
     grid = _GridBudget()
-    body = _docx_blocks(doc.blocks, grid)
-    for i, note in enumerate(doc.notes, 1):  # notes as trailing paragraphs, matching the [^n] markers
-        body.append(_docx_para(f"[^{i}]:"))
-        body.extend(_docx_blocks(note, grid))
     sect = ('<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" '
             'w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr>')
-    document = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                f'<w:document xmlns:w="{_W_NS}"><w:body>{"".join(body)}{sect}</w:body></w:document>')
     parts = {
         "[Content_Types].xml": (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -920,15 +926,25 @@ def to_docx(doc: Doc) -> bytes:
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
             'relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
-        "word/document.xml": document,
     }
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+    with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as z:
         for name, xml_text in parts.items():
-            # A fixed timestamp makes the same input produce byte-identical output.
-            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            z.writestr(info, xml_text.encode("utf-8"))
+            z.writestr(_zip_entry(name), xml_text.encode("utf-8"))
+        with z.open(_zip_entry("word/document.xml"), "w") as w:
+            w.write(f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    f'<w:document xmlns:w="{_W_NS}"><w:body>'.encode("utf-8"))
+            for b in doc.blocks:
+                w.write(_docx_blocks([b], grid)[0].encode("utf-8"))
+            for i, note in enumerate(doc.notes, 1):  # notes as trailing paragraphs, matching the [^n] markers
+                w.write(_docx_para(f"[^{i}]:").encode("utf-8"))
+                for b in note:
+                    w.write(_docx_blocks([b], grid)[0].encode("utf-8"))
+            w.write(f"{sect}</w:body></w:document>".encode("utf-8"))
+
+
+def to_docx(doc: Doc) -> bytes:
+    buf = io.BytesIO()
+    write_docx(doc, buf)
     return buf.getvalue()
 
 
@@ -1138,13 +1154,12 @@ def cmd_convert(a) -> int:
         sys.stderr.write(json.dumps({"error": "usage", "message": f"출력 경로가 입력 파일과 같습니다: {out}. "
                                      "-o로 다른 경로를 지정하세요."}, ensure_ascii=False) + "\n")
         return 2
-    data = to_docx(doc)  # build fully first: a conversion error must not touch the destination
-    # Write a temp file beside the destination and swap it in only after it is complete,
-    # so a failed write (disk full, quota) also leaves an existing file intact.
+    # Stream into a temp file beside the destination and swap it in only once complete, so
+    # a conversion error or a failed write (disk full, quota) leaves an existing file intact.
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(out)), prefix=".hwp_read-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(data)
+            write_docx(doc, f)
         # mkstemp creates 0600: keep an existing file's mode, else use the normal umask-based one.
         if os.path.exists(out):
             mode = os.stat(out).st_mode & 0o7777

@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 import zlib
@@ -450,6 +451,33 @@ class Fixtures(unittest.TestCase):
         _, root = self._docx_xml("e-phi-design.hwp")
         for tc in root.iter(f"{W}tc"):
             self.assertEqual(tc[-1].tag, f"{W}p")  # Word rejects a cell whose last child is not a paragraph
+
+    def test_docx_refuses_oversized_grids(self):
+        big = h.MAX_DOCX_GRID_CELLS + 1
+        for cell in (h.Cell(0, 0, 1, big, [h.Para("x")]), h.Cell(0, 0, big, 1, [h.Para("x")])):
+            doc = h.Doc("hwpx", blocks=[h.Table(1, 1, [cell])])
+            with self.assertRaises(h.Unsupported):
+                h.to_docx(doc)
+
+    def test_docx_output_is_deterministic(self):
+        doc = h.load(os.path.join(FIX, "sk-openinno-form.hwpx"))
+        first = h.to_docx(doc)
+        time.sleep(2.1)  # a ZIP timestamp has 2-second resolution; always cross a tick boundary
+        self.assertEqual(first, h.to_docx(doc))
+
+    def test_cli_convert_reports_low_coverage(self):
+        src = os.path.join(FIX, "sk-openinno-form.hwpx")
+        p = os.path.join(self.tmp, "stale-preview.hwpx")
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(p, "w") as zout:
+            for info in zin.infolist():
+                data = zin.read(info.filename)
+                if info.filename == "Preview/PrvText.txt":
+                    data = "\r\n".join(f"<본문에 없는 미리보기 줄 {i}>" for i in range(20)).encode("utf-8")
+                zout.writestr(info, data)
+        r = subprocess.run([sys.executable, SCRIPT, "convert", p, "--to", "docx", "-o",
+                            os.path.join(self.tmp, "out.docx")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("preview_coverage", r.stdout)
 
     def test_cli_convert_docx(self):
         out = os.path.join(self.tmp, "form.docx")

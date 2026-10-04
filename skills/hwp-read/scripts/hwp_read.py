@@ -811,6 +811,20 @@ _XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
 _TBL_BORDERS = "".join(f'<w:{s} w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
                        for s in ("top", "left", "bottom", "right", "insideH", "insideV"))
 _TEXT_WIDTH = 9638  # twips between A4 margins of 1134 twips (2 cm)
+# Spans come from the document: a single cell can declare a 65,535-column span, and the
+# DOCX grid materializes every slot. Cap the slots one document may produce.
+MAX_DOCX_GRID_CELLS = 500_000
+
+
+class _GridBudget:
+    def __init__(self):
+        self.left = MAX_DOCX_GRID_CELLS
+
+    def spend(self, nrows: int, ncols: int) -> None:
+        self.left -= nrows * ncols
+        if self.left < 0:
+            raise Unsupported(f"표 격자가 너무 큽니다 ({nrows}×{ncols}). 문서 전체 한도 "
+                              f"{MAX_DOCX_GRID_CELLS}칸을 넘어 DOCX로 변환하지 않습니다.")
 
 
 def _docx_para(text: str, indent: bool = False) -> str:
@@ -827,8 +841,8 @@ def _docx_para(text: str, indent: bool = False) -> str:
     return f"<w:p>{ppr}<w:r>{''.join(runs)}</w:r></w:p>" if runs else f"<w:p>{ppr}</w:p>"
 
 
-def _docx_blocks(blocks: List[Block]) -> List[str]:
-    return [_docx_table(b) if isinstance(b, Table) else _docx_para(b.text, b.kind == "textbox")
+def _docx_blocks(blocks: List[Block], grid: _GridBudget) -> List[str]:
+    return [_docx_table(b, grid) if isinstance(b, Table) else _docx_para(b.text, b.kind == "textbox")
             for b in blocks]
 
 
@@ -841,11 +855,12 @@ def _docx_cell(span: int, vmerge: Optional[str], content: List[str]) -> str:
     return f"<w:tc><w:tcPr>{props}</w:tcPr>{body}</w:tc>"
 
 
-def _docx_table(t: Table) -> str:
+def _docx_table(t: Table, grid: _GridBudget) -> str:
     if not t.cells:
         return f"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol/></w:tblGrid><w:tr>{_docx_cell(1, None, [])}</w:tr></w:tbl>"
     nrows = max(c.row + c.rowspan for c in t.cells)
     ncols = max(c.col + c.colspan for c in t.cells)
+    grid.spend(nrows, ncols)  # before anything is built from the spans
     starts = {(c.row, c.col): c for c in t.cells}
     below = {(r, c.col): c for c in t.cells for r in range(c.row + 1, c.row + c.rowspan)}
     rows = []
@@ -854,7 +869,8 @@ def _docx_table(t: Table) -> str:
         while col < ncols:
             c = starts.get((r, col))
             if c is not None:
-                tcs.append(_docx_cell(c.colspan, "restart" if c.rowspan > 1 else None, _docx_blocks(c.blocks)))
+                tcs.append(_docx_cell(c.colspan, "restart" if c.rowspan > 1 else None,
+                                      _docx_blocks(c.blocks, grid)))
                 col += c.colspan
             elif (r, col) in below:  # continuation of a vertical merge started above
                 tcs.append(_docx_cell(below[(r, col)].colspan, "continue", []))
@@ -869,10 +885,11 @@ def _docx_table(t: Table) -> str:
 
 
 def to_docx(doc: Doc) -> bytes:
-    body = _docx_blocks(doc.blocks)
+    grid = _GridBudget()
+    body = _docx_blocks(doc.blocks, grid)
     for i, note in enumerate(doc.notes, 1):  # notes as trailing paragraphs, matching the [^n] markers
         body.append(_docx_para(f"[^{i}]:"))
-        body.extend(_docx_blocks(note))
+        body.extend(_docx_blocks(note, grid))
     sect = ('<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" '
             'w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr>')
     document = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -895,7 +912,10 @@ def to_docx(doc: Doc) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for name, xml_text in parts.items():
-            z.writestr(name, xml_text.encode("utf-8"))
+            # A fixed timestamp makes the same input produce byte-identical output.
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(info, xml_text.encode("utf-8"))
     return buf.getvalue()
 
 
@@ -1053,6 +1073,11 @@ def cmd_extract(a) -> int:
     else:
         sys.stdout.write(md)
     sys.stderr.write(json.dumps(st, ensure_ascii=False) + "\n")
+    return _exit_code(st)
+
+
+def _exit_code(st: dict) -> int:
+    """4 when the self-check suspects missing text (shared by extract and convert), else 0."""
     return 4 if st["warnings"] and st.get("preview_coverage") is not None and st["preview_coverage"] < 0.9 else 0
 
 
@@ -1096,12 +1121,12 @@ def cmd_convert(a) -> int:
     out = a.output or os.path.splitext(os.path.basename(a.file))[0] + ".docx"
     with open(out, "wb") as f:
         f.write(to_docx(doc))
-    md = to_markdown(doc)
-    st = stats(doc, md)
+    st = stats(doc, to_markdown(doc))
     print(json.dumps({"format": "docx", "output": out, "tables": st["tables"], "merged_tables": st["merged_tables"],
+                      "preview_coverage": st["preview_coverage"], "warnings": st["warnings"],
                       "note": "구조(문단·표·병합 셀)만 옮김. 글꼴·쪽 배치·그림은 포함되지 않음"},
                      ensure_ascii=False))
-    return 0
+    return _exit_code(st)
 
 
 def main(argv=None) -> int:

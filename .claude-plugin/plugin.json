@@ -1,6 +1,6 @@
 {
   "name": "cc-hwp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read Korean Hangul .hwp/.hwpx documents as Markdown (tables, text boxes, footnotes), convert them to Word (.docx) with merged cells and borders, and render pages for visual checks, without Hancom Office.",
   "author": {
     "name": "Dongmin Yu",

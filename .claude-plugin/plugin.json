@@ -1,0 +1,13 @@
+{
+  "name": "cc-hwp",
+  "version": "0.1.0",
+  "description": "Read Korean Hangul .hwp/.hwpx documents as Markdown (tables, text boxes, footnotes) without Hancom Office or PDF conversion.",
+  "author": {
+    "name": "Dongmin Yu",
+    "url": "https://github.com/AndrewDongminYoo"
+  },
+  "homepage": "https://github.com/AndrewDongminYoo/cc-hwp",
+  "repository": "https://github.com/AndrewDongminYoo/cc-hwp",
+  "license": "MIT",
+  "keywords": ["hwp", "hwpx", "hangul", "한글", "한컴", "hancom", "korean", "document"]
+}

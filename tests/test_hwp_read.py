@@ -295,6 +295,21 @@ class Fixtures(unittest.TestCase):
             h._inflate(raw, "BinData/BIN0001.bmp", budget)
         self.assertLessEqual(budget.left, before - (1000 - h.INFLATE_CHUNK))
 
+    def test_sub_chunk_zlib_failure_is_charged(self):
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"x" * 100) + c.flush(zlib.Z_SYNC_FLUSH) + b"\x06"  # fails inside the first chunk
+        budget = h._Budget()
+        before = budget.left
+        with self.assertRaises(zlib.error):
+            h._inflate(raw, "BinData/BIN0001.bmp", budget)
+        self.assertGreaterEqual(before - budget.left, 100)
+
+    def test_stored_image_signatures(self):
+        for head in (b"\xff\xd8\xff\xe0", b"\x89PNG\r\n\x1a\n", b"GIF89a", b"BM\x36\x00"):
+            self.assertTrue(h._looks_stored(head + b"rest"), head)
+        c = zlib.compressobj(wbits=-15)
+        self.assertFalse(h._looks_stored(c.compress(b"x" * 100) + c.flush()))
+
     def test_chunked_inflation_restores_whole_stream(self):
         orig = h.INFLATE_CHUNK
         h.INFLATE_CHUNK = 64

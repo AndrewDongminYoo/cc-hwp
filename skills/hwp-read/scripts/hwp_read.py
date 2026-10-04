@@ -47,6 +47,11 @@ MAX_DOC_BYTES = 256 * 1024 * 1024
 INFLATE_CHUNK = 1024 * 1024  # inflate in steps so work is charged even if zlib then fails
 
 
+def _looks_stored(raw: bytes) -> bool:
+    """BinData image saved without compression (JPEG, PNG, GIF, BMP)."""
+    return raw.startswith((b"\xff\xd8\xff", b"\x89PNG", b"GIF8", b"BM"))
+
+
 class _Budget:
     """Decompressed bytes one document may still produce across all of its parts."""
 
@@ -74,7 +79,11 @@ def _inflate(raw: bytes, what: str, budget: _Budget) -> bytes:
     # later rejected (truncated, invalid block, oversized) still pays for its work.
     while not d.eof:
         want = min(INFLATE_CHUNK, limit + 1 - len(out))  # >= 1: zlib reads max_length=0 as "no limit"
-        chunk = d.decompress(data, want)
+        try:
+            chunk = d.decompress(data, want)
+        except zlib.error:
+            budget.spend(want)  # zlib may have produced up to `want` bytes before failing
+            raise
         budget.spend(len(chunk))
         out += chunk
         if len(out) > limit:
@@ -889,9 +898,10 @@ def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
         for p in r.cfb.list("BinData/"):
             raw = r.cfb.read(p)
             try:
-                raw = _inflate(raw, p, doc.budget) if r.compressed else raw
+                if r.compressed and not _looks_stored(raw):
+                    raw = _inflate(raw, p, doc.budget)
             except (zlib.error, ValueError):
-                pass  # some BinData entries are stored uncompressed
+                pass  # not a valid deflate stream: keep the stored bytes (the failed attempt was charged)
             dst = _safe_dest(outdir, p)
             if dst is None:
                 continue

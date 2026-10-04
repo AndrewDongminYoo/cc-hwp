@@ -44,6 +44,7 @@ class Unsupported(Exception):
 # inflate into an out-of-memory crash.
 MAX_PART_BYTES = 128 * 1024 * 1024
 MAX_DOC_BYTES = 256 * 1024 * 1024
+INFLATE_CHUNK = 1024 * 1024  # inflate in steps so work is charged even if zlib then fails
 
 
 class _Budget:
@@ -67,14 +68,23 @@ def _too_large(what: str, limit: int) -> Unsupported:
 def _inflate(raw: bytes, what: str, budget: _Budget) -> bytes:
     limit = budget.limit()
     d = zlib.decompressobj(-15)
-    # limit + 1, never 0: zlib treats max_length=0 as "no limit".
-    out = d.decompress(raw, limit + 1)
-    budget.spend(len(out))  # charge the work even when the stream is then rejected
-    if len(out) > limit or d.unconsumed_tail:
-        raise _too_large(what, limit)
+    out = bytearray()
+    data = raw
+    # Inflate in chunks and charge each one as it is produced, so a stream that is
+    # later rejected (truncated, invalid block, oversized) still pays for its work.
+    while not d.eof:
+        want = min(INFLATE_CHUNK, limit + 1 - len(out))  # >= 1: zlib reads max_length=0 as "no limit"
+        chunk = d.decompress(data, want)
+        budget.spend(len(chunk))
+        out += chunk
+        if len(out) > limit:
+            raise _too_large(what, limit)
+        data = d.unconsumed_tail
+        if not data and len(chunk) < want:
+            break  # input exhausted and zlib has nothing buffered
     if not d.eof:
         raise ValueError(f"{what}: 압축 스트림이 중간에 끊겼습니다 (손상된 문서).")
-    return out
+    return bytes(out)
 
 
 def _zip_read(z: zipfile.ZipFile, name: str, budget: _Budget) -> bytes:

@@ -283,6 +283,30 @@ class Fixtures(unittest.TestCase):
             h._inflate(raw[: len(raw) // 2], "BinData/BIN0001.bmp", budget)
         self.assertLess(budget.left, before)
 
+    def test_inflation_charged_before_zlib_error(self):
+        orig = h.INFLATE_CHUNK
+        h.INFLATE_CHUNK = 64
+        self.addCleanup(setattr, h, "INFLATE_CHUNK", orig)
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"x" * 1000) + c.flush(zlib.Z_SYNC_FLUSH) + b"\x06"  # valid prefix, then a reserved block type
+        budget = h._Budget()
+        before = budget.left
+        with self.assertRaises(zlib.error):
+            h._inflate(raw, "BinData/BIN0001.bmp", budget)
+        self.assertLessEqual(budget.left, before - (1000 - h.INFLATE_CHUNK))
+
+    def test_chunked_inflation_restores_whole_stream(self):
+        orig = h.INFLATE_CHUNK
+        h.INFLATE_CHUNK = 64
+        self.addCleanup(setattr, h, "INFLATE_CHUNK", orig)
+        payload = bytes(range(256)) * 40
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(payload) + c.flush()
+        budget = h._Budget()
+        before = budget.left
+        self.assertEqual(h._inflate(raw, "BodyText/Section0", budget), payload)
+        self.assertEqual(before - budget.left, len(payload))
+
     def test_images_share_the_document_budget(self):
         p = os.path.join(FIX, "sk-openinno-form.hwpx")
         doc = h.load(p)

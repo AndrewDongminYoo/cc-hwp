@@ -511,6 +511,14 @@ class Fixtures(unittest.TestCase):
         os.umask(umask)
         self.assertEqual(os.stat(out).st_mode & 0o777, 0o666 & ~umask)  # not mkstemp's 0600
 
+    def test_convert_keeps_existing_output_permissions(self):
+        out = os.path.join(self.tmp, "private.docx")
+        with open(out, "wb") as f:
+            f.write(b"old")
+        os.chmod(out, 0o600)
+        h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"), output=out, to="docx"))
+        self.assertEqual(os.stat(out).st_mode & 0o777, 0o600)
+
     def test_docx_output_is_deterministic(self):
         doc = h.load(os.path.join(FIX, "sk-openinno-form.hwpx"))
         first = h.to_docx(doc)

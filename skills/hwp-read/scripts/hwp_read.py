@@ -1145,9 +1145,14 @@ def cmd_convert(a) -> int:
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(tmp, 0o666 & ~umask)  # mkstemp creates 0600; give the result normal file permissions
+        # mkstemp creates 0600: keep an existing file's mode, else use the normal umask-based one.
+        if os.path.exists(out):
+            mode = os.stat(out).st_mode & 0o7777
+        else:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp, mode)
         os.replace(tmp, out)
     except BaseException:
         if os.path.exists(tmp):

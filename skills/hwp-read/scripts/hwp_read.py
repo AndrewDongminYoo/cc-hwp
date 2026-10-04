@@ -861,6 +861,7 @@ def _docx_cell(span: int, vmerge: Optional[str], content: List[str]) -> str:
 
 def _docx_table(t: Table, grid: _GridBudget) -> str:
     if not t.cells:
+        grid.spend(1, 1)  # the synthesized one-cell table counts too
         return f"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol/></w:tblGrid><w:tr>{_docx_cell(1, None, [])}</w:tr></w:tbl>"
     nrows = max(c.row + c.rowspan for c in t.cells)
     ncols = max(c.col + c.colspan for c in t.cells)

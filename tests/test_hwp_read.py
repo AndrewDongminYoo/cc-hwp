@@ -495,6 +495,14 @@ class Fixtures(unittest.TestCase):
         time.sleep(2.1)  # a ZIP timestamp has 2-second resolution; always cross a tick boundary
         self.assertEqual(first, h.to_docx(doc))
 
+    def test_empty_tables_are_charged_to_the_grid(self):
+        orig = h.MAX_DOCX_GRID_CELLS
+        h.MAX_DOCX_GRID_CELLS = 3
+        self.addCleanup(setattr, h, "MAX_DOCX_GRID_CELLS", orig)
+        doc = h.Doc("hwpx", blocks=[h.Table(0, 0, []) for _ in range(4)])
+        with self.assertRaises(h.Unsupported):
+            h.to_docx(doc)
+
     def test_cli_convert_reports_low_coverage(self):
         src = os.path.join(FIX, "sk-openinno-form.hwpx")
         p = os.path.join(self.tmp, "stale-preview.hwpx")

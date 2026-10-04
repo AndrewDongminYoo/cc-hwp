@@ -69,11 +69,11 @@ def _inflate(raw: bytes, what: str, budget: _Budget) -> bytes:
     d = zlib.decompressobj(-15)
     # limit + 1, never 0: zlib treats max_length=0 as "no limit".
     out = d.decompress(raw, limit + 1)
+    budget.spend(len(out))  # charge the work even when the stream is then rejected
     if len(out) > limit or d.unconsumed_tail:
         raise _too_large(what, limit)
     if not d.eof:
         raise ValueError(f"{what}: 압축 스트림이 중간에 끊겼습니다 (손상된 문서).")
-    budget.spend(len(out))
     return out
 
 
@@ -139,6 +139,8 @@ class Doc:
     preview_text: str = ""
     meta: dict = field(default_factory=dict)
     counters: dict = field(default_factory=lambda: {"equations": 0, "pictures": 0, "textboxes": 0})
+    # The reader's decompression budget, so later reads of the same file (images) share it.
+    budget: _Budget = field(default_factory=_Budget, repr=False, compare=False)
 
 
 # ───────────────────────────── minimal CFB (OLE2) reader ─────────────────────────────
@@ -313,7 +315,7 @@ class Hwp5Reader:
         self.flags = struct.unpack_from("<I", hdr, 36)[0]
         self.version = f"{(ver >> 24) & 0xFF}.{(ver >> 16) & 0xFF}.{(ver >> 8) & 0xFF}.{ver & 0xFF}"
         self.compressed = bool(self.flags & 0x01)
-        self.doc = Doc("hwp5")
+        self.doc = Doc("hwp5", budget=self.budget)
         self.doc.meta.update(version=self.version, compressed=self.compressed,
                              password=bool(self.flags & 0x02), distribution=bool(self.flags & 0x04))
         if self.flags & 0x02:
@@ -517,7 +519,7 @@ class HwpxReader:
         manifest = _zip_read(self.z, "META-INF/manifest.xml", self.budget).decode(errors="replace") if "META-INF/manifest.xml" in names else ""
         if "encryption-data" in manifest:
             raise Unsupported("암호화된 HWPX 문서입니다.")
-        self.doc = Doc("hwpx")
+        self.doc = Doc("hwpx", budget=self.budget)
         self.doc.meta["mimetype"] = mime
 
     def _package(self):
@@ -877,7 +879,7 @@ def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
         for p in r.cfb.list("BinData/"):
             raw = r.cfb.read(p)
             try:
-                raw = _inflate(raw, p, r.budget) if r.compressed else raw
+                raw = _inflate(raw, p, doc.budget) if r.compressed else raw
             except (zlib.error, ValueError):
                 pass  # some BinData entries are stored uncompressed
             dst = _safe_dest(outdir, p)
@@ -888,14 +890,13 @@ def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
             written.append(dst)
     else:
         z = zipfile.ZipFile(path)
-        budget = _Budget()
         for n in z.namelist():
             if n.startswith("BinData/"):
                 dst = _safe_dest(outdir, n)
                 if dst is None:
                     continue
                 with open(dst, "wb") as f:
-                    f.write(_zip_read(z, n, budget))
+                    f.write(_zip_read(z, n, doc.budget))
                 written.append(dst)
     return written
 

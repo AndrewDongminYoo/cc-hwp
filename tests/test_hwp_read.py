@@ -274,6 +274,22 @@ class Fixtures(unittest.TestCase):
         with self.assertRaises(h.Unsupported):
             h._inflate(raw, "BodyText/Section1", budget)
 
+    def test_failed_inflation_is_charged(self):
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"complete paragraph text " * 20) + c.flush()
+        budget = h._Budget()
+        before = budget.left
+        with self.assertRaises(ValueError):
+            h._inflate(raw[: len(raw) // 2], "BinData/BIN0001.bmp", budget)
+        self.assertLess(budget.left, before)
+
+    def test_images_share_the_document_budget(self):
+        p = os.path.join(FIX, "sk-openinno-form.hwpx")
+        doc = h.load(p)
+        doc.budget.left = 10  # parsing spent the rest; the BinData images do not fit
+        with self.assertRaises(h.Unsupported):
+            h.save_images(p, doc, os.path.join(self.tmp, "images"))
+
     def test_hwpx_package_read_once(self):
         reads = []
         orig = h._zip_read

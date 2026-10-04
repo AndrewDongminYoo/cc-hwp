@@ -5,6 +5,7 @@ import html
 import io
 import os
 import re
+import resource
 import shutil
 import struct
 import subprocess
@@ -488,6 +489,27 @@ class Fixtures(unittest.TestCase):
         with self.assertRaises(h.Unsupported):
             h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"), output=out, to="docx"))
         self.assertEqual(_read(out), b"previous result")
+
+    def test_failed_write_keeps_existing_output(self):
+        out = os.path.join(self.tmp, "existing.docx")
+        with open(out, "wb") as f:
+            f.write(b"previous result")
+
+        def small_file_limit():  # a real write failure (EFBIG) once output passes 1000 bytes
+            resource.setrlimit(resource.RLIMIT_FSIZE, (1000, 1000))
+
+        r = subprocess.run([sys.executable, SCRIPT, "convert", os.path.join(FIX, "sk-openinno-form.hwpx"),
+                            "--to", "docx", "-o", out], capture_output=True, text=True, preexec_fn=small_file_limit)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(_read(out), b"previous result")
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["existing.docx"])  # no temp file left behind
+
+    def test_convert_output_has_normal_permissions(self):
+        out = os.path.join(self.tmp, "fresh.docx")
+        h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"), output=out, to="docx"))
+        umask = os.umask(0)
+        os.umask(umask)
+        self.assertEqual(os.stat(out).st_mode & 0o777, 0o666 & ~umask)  # not mkstemp's 0600
 
     def test_docx_output_is_deterministic(self):
         doc = h.load(os.path.join(FIX, "sk-openinno-form.hwpx"))

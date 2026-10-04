@@ -28,6 +28,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import zipfile
 import zlib
 import xml.etree.ElementTree as ET
@@ -1137,9 +1138,21 @@ def cmd_convert(a) -> int:
         sys.stderr.write(json.dumps({"error": "usage", "message": f"출력 경로가 입력 파일과 같습니다: {out}. "
                                      "-o로 다른 경로를 지정하세요."}, ensure_ascii=False) + "\n")
         return 2
-    data = to_docx(doc)  # build fully first: opening with "wb" would empty an existing file on failure
-    with open(out, "wb") as f:
-        f.write(data)
+    data = to_docx(doc)  # build fully first: a conversion error must not touch the destination
+    # Write a temp file beside the destination and swap it in only after it is complete,
+    # so a failed write (disk full, quota) also leaves an existing file intact.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(out)), prefix=".hwp_read-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)  # mkstemp creates 0600; give the result normal file permissions
+        os.replace(tmp, out)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
     st = stats(doc, to_markdown(doc))
     print(json.dumps({"format": "docx", "output": out, "tables": st["tables"], "merged_tables": st["merged_tables"],
                       "preview_coverage": st["preview_coverage"], "warnings": st["warnings"],

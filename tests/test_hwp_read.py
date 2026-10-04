@@ -495,6 +495,11 @@ class Fixtures(unittest.TestCase):
         time.sleep(2.1)  # a ZIP timestamp has 2-second resolution; always cross a tick boundary
         self.assertEqual(first, h.to_docx(doc))
 
+    def test_docx_rejects_overlapping_cells(self):
+        dup = [h.Cell(0, 0, 500, 1, [h.Para("x")]) for _ in range(1000)]  # same slot, large rowspan
+        with self.assertRaises(ValueError):
+            h.to_docx(h.Doc("hwpx", blocks=[h.Table(500, 1, dup)]))
+
     def test_empty_tables_are_charged_to_the_grid(self):
         orig = h.MAX_DOCX_GRID_CELLS
         h.MAX_DOCX_GRID_CELLS = 3

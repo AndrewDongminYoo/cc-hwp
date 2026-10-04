@@ -866,23 +866,30 @@ def _docx_table(t: Table, grid: _GridBudget) -> str:
     nrows = max(c.row + c.rowspan for c in t.cells)
     ncols = max(c.col + c.colspan for c in t.cells)
     grid.spend(nrows, ncols)  # before anything is built from the spans
-    starts = {(c.row, c.col): c for c in t.cells}
-    below = {(r, c.col): c for c in t.cells for r in range(c.row + 1, c.row + c.rowspan)}
+    # One owner per grid slot. Marking stops at the first slot claimed twice, so the work
+    # is bounded by the charged grid even when a document repeats cells with huge spans.
+    owner: dict = {}
+    for c in t.cells:
+        for r in range(c.row, c.row + c.rowspan):
+            for k in range(c.col, c.col + c.colspan):
+                if (r, k) in owner:
+                    raise ValueError(f"표 셀이 서로 겹칩니다 (행 {r}, 열 {k}; 손상된 문서).")
+                owner[(r, k)] = c
     rows = []
     for r in range(nrows):
         tcs, col = [], 0
         while col < ncols:
-            c = starts.get((r, col))
-            if c is not None:
+            c = owner.get((r, col))
+            if c is None:  # a hole in a malformed grid
+                tcs.append(_docx_cell(1, None, []))
+                col += 1
+            elif c.row == r:
                 tcs.append(_docx_cell(c.colspan, "restart" if c.rowspan > 1 else None,
                                       _docx_blocks(c.blocks, grid)))
                 col += c.colspan
-            elif (r, col) in below:  # continuation of a vertical merge started above
-                tcs.append(_docx_cell(below[(r, col)].colspan, "continue", []))
-                col += below[(r, col)].colspan
-            else:  # a hole in a malformed grid
-                tcs.append(_docx_cell(1, None, []))
-                col += 1
+            else:  # continuation of a vertical merge started above
+                tcs.append(_docx_cell(c.colspan, "continue", []))
+                col += c.colspan
         rows.append("<w:tr>" + "".join(tcs) + "</w:tr>")
     grid = f'<w:gridCol w:w="{max(_TEXT_WIDTH // ncols, 1)}"/>' * ncols
     return (f'<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>{_TBL_BORDERS}</w:tblBorders>'

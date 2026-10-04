@@ -40,30 +40,81 @@ class Unsupported(Exception):
 
 
 # Documents come from the internet: cap every decompressed part (ZIP member or
-# HWP5 stream) so a small archive cannot inflate into an out-of-memory crash.
+# HWP5 stream), and the sum over one document, so a small archive cannot
+# inflate into an out-of-memory crash.
 MAX_PART_BYTES = 128 * 1024 * 1024
+MAX_DOC_BYTES = 256 * 1024 * 1024
+INFLATE_CHUNK = 1024 * 1024  # inflate in steps so work is charged even if zlib then fails
 
 
-def _too_large(what: str) -> Unsupported:
-    return Unsupported(f"{what}의 압축 해제 크기가 {MAX_PART_BYTES} 바이트를 넘습니다. "
+def _inflate_bound(n_in: int) -> int:
+    """Most output raw deflate can produce from n_in input bytes: at most 1032x expansion,
+    plus what zlib may still hold from earlier input (a 32 KiB window and one 258-byte match)."""
+    return n_in * 1032 + 32 * 1024 + 258
+
+
+def _looks_stored(raw: bytes) -> bool:
+    """BinData image saved without compression (JPEG, PNG, GIF, BMP)."""
+    return raw.startswith((b"\xff\xd8\xff", b"\x89PNG", b"GIF8", b"BM"))
+
+
+class _Budget:
+    """Decompressed bytes one document may still produce across all of its parts."""
+
+    def __init__(self):
+        self.left = MAX_DOC_BYTES
+
+    def limit(self, what: str) -> int:
+        # Refuse here, before any read: a zero or negative limit would reach zlib as
+        # max_length=0, which means "no limit".
+        if self.left <= 0:
+            raise _too_large(what, 0)
+        return min(MAX_PART_BYTES, self.left)
+
+    def spend(self, n: int) -> None:
+        self.left -= n
+
+
+def _too_large(what: str, limit: int) -> Unsupported:
+    return Unsupported(f"{what}의 압축 해제 크기가 남은 한도({limit} 바이트)를 넘습니다. "
                        "손상되었거나 압축 폭탄일 수 있는 문서라 읽지 않습니다.")
 
 
-def _inflate(raw: bytes, what: str) -> bytes:
+def _inflate(raw: bytes, what: str, budget: _Budget) -> bytes:
+    limit = budget.limit(what)
     d = zlib.decompressobj(-15)
-    out = d.decompress(raw, MAX_PART_BYTES)
-    if d.unconsumed_tail:
-        raise _too_large(what)
+    out = bytearray()
+    data = raw
+    # Inflate in chunks and charge each one as it is produced, so a stream that is
+    # later rejected (truncated, invalid block, oversized) still pays for its work.
+    while not d.eof:
+        want = min(INFLATE_CHUNK, limit + 1 - len(out))  # >= 1: zlib reads max_length=0 as "no limit"
+        try:
+            chunk = d.decompress(data, want)
+        except zlib.error:
+            # zlib may have produced output before failing; charge the most it could have,
+            # which for a few stored bytes is far less than a whole chunk.
+            budget.spend(min(want, _inflate_bound(len(data))))
+            raise
+        budget.spend(len(chunk))
+        out += chunk
+        if len(out) > limit:
+            raise _too_large(what, limit)
+        data = d.unconsumed_tail
+        if not data and len(chunk) < want:
+            break  # input exhausted and zlib has nothing buffered
     if not d.eof:
         raise ValueError(f"{what}: 압축 스트림이 중간에 끊겼습니다 (손상된 문서).")
-    return out
+    return bytes(out)
 
 
-def _zip_read(z: zipfile.ZipFile, name: str) -> bytes:
+def _zip_read(z: zipfile.ZipFile, name: str, budget: _Budget) -> bytes:
+    limit = budget.limit(name)
     with z.open(name) as f:
-        data = f.read(MAX_PART_BYTES + 1)
-    if len(data) > MAX_PART_BYTES:
-        raise _too_large(name)
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise _too_large(name, limit)
+    budget.spend(len(data))
     return data
 
 
@@ -119,6 +170,8 @@ class Doc:
     preview_text: str = ""
     meta: dict = field(default_factory=dict)
     counters: dict = field(default_factory=lambda: {"equations": 0, "pictures": 0, "textboxes": 0})
+    # The reader's decompression budget, so later reads of the same file (images) share it.
+    budget: _Budget = field(default_factory=_Budget, repr=False, compare=False)
 
 
 # ───────────────────────────── minimal CFB (OLE2) reader ─────────────────────────────
@@ -247,8 +300,12 @@ def _records(buf: bytes) -> List[Rec]:
         if size == 0xFFF:
             size = struct.unpack_from("<I", buf, i)[0]
             i += 4
+        if i + size > len(buf):
+            raise ValueError(f"레코드(tag {tag:#x})가 섹션 끝을 넘습니다 (손상되었거나 잘린 문서).")
         out.append(Rec(tag, level, buf[i:i + size]))
         i += size
+    if i != len(buf):
+        raise ValueError(f"섹션 끝에 불완전한 레코드 헤더 {len(buf) - i}바이트가 있습니다 (잘린 문서).")
     return out
 
 
@@ -281,6 +338,7 @@ def _ctrl_id(data: bytes) -> str:
 class Hwp5Reader:
     def __init__(self, data: bytes):
         self.cfb = CFB(data)
+        self.budget = _Budget()
         hdr = self.cfb.read("FileHeader")
         if not hdr.startswith(b"HWP Document File"):
             raise Unsupported("CFB container but not an HWP 5.0 FileHeader")
@@ -288,7 +346,7 @@ class Hwp5Reader:
         self.flags = struct.unpack_from("<I", hdr, 36)[0]
         self.version = f"{(ver >> 24) & 0xFF}.{(ver >> 16) & 0xFF}.{(ver >> 8) & 0xFF}.{ver & 0xFF}"
         self.compressed = bool(self.flags & 0x01)
-        self.doc = Doc("hwp5")
+        self.doc = Doc("hwp5", budget=self.budget)
         self.doc.meta.update(version=self.version, compressed=self.compressed,
                              password=bool(self.flags & 0x02), distribution=bool(self.flags & 0x04))
         if self.flags & 0x02:
@@ -299,7 +357,7 @@ class Hwp5Reader:
 
     def _stream(self, path: str) -> bytes:
         raw = self.cfb.read(path)
-        return _inflate(raw, path) if self.compressed else raw
+        return _inflate(raw, path, self.budget) if self.compressed else raw
 
     def read(self) -> Doc:
         if self.cfb.exists("PrvText"):
@@ -482,58 +540,58 @@ class HwpxReader:
     def __init__(self, data: bytes, path: str):
         import io
         self.z = zipfile.ZipFile(io.BytesIO(data))
+        self.budget = _Budget()
         names = set(self.z.namelist())
-        mime = _zip_read(self.z, "mimetype").decode(errors="replace").strip() if "mimetype" in names else ""
+        mime = _zip_read(self.z, "mimetype", self.budget).decode(errors="replace").strip() if "mimetype" in names else ""
         if mime and "hwp" not in mime:
             raise Unsupported(f"ZIP 컨테이너지만 HWPX가 아닙니다 (mimetype={mime})")
         if not mime and "Contents/content.hpf" not in names:
             raise Unsupported("ZIP 컨테이너지만 HWPX 패키지 표지(mimetype, Contents/content.hpf)가 없습니다.")
-        manifest = _zip_read(self.z, "META-INF/manifest.xml").decode(errors="replace") if "META-INF/manifest.xml" in names else ""
+        manifest = _zip_read(self.z, "META-INF/manifest.xml", self.budget).decode(errors="replace") if "META-INF/manifest.xml" in names else ""
         if "encryption-data" in manifest:
             raise Unsupported("암호화된 HWPX 문서입니다.")
-        self.doc = Doc("hwpx")
+        self.doc = Doc("hwpx", budget=self.budget)
         self.doc.meta["mimetype"] = mime
 
-    def _sections(self) -> List[str]:
-        names = self.z.namelist()
+    def _package(self):
+        """content.hpf parsed once (it is charged to the budget), or None if absent or unreadable."""
         try:
-            hpf = _xml(_zip_read(self.z, "Contents/content.hpf"))
+            return _xml(_zip_read(self.z, "Contents/content.hpf", self.budget))
+        except Unsupported:
+            raise
+        except Exception:
+            return None
+
+    def _sections(self, hpf) -> List[str]:
+        names = self.z.namelist()
+        if hpf is not None:
             items = {i.get("id"): i.get("href") for i in hpf.iter() if _local(i.tag) == "item"}
             spine = [items.get(r.get("idref")) for r in hpf.iter() if _local(r.tag) == "itemref"]
             secs = [s for s in spine if s and re.search(r"section\d+\.xml$", s)]
             if secs:
                 return [s if s in names else "Contents/" + s.split("/")[-1] for s in secs]
-        except Unsupported:
-            raise
-        except Exception:
-            pass
         return sorted((n for n in names if re.match(r"Contents/section\d+\.xml$", n)),
                       key=lambda s: int(re.findall(r"\d+", s)[-1]))
 
     def read(self) -> Doc:
         names = set(self.z.namelist())
         if "Preview/PrvText.txt" in names:
-            raw = _zip_read(self.z, "Preview/PrvText.txt")
+            raw = _zip_read(self.z, "Preview/PrvText.txt", self.budget)
             for enc in ("utf-8", "utf-16"):
                 try:
                     self.doc.preview_text = raw.decode(enc)
                     break
                 except UnicodeDecodeError:
                     continue
-        try:
-            hpf = _xml(_zip_read(self.z, "Contents/content.hpf"))
-            for m in hpf.iter():
-                if _local(m.tag) == "title" and (m.text or "").strip():
-                    self.doc.meta["title"] = m.text.strip()
-        except Unsupported:
-            raise
-        except Exception:
-            pass
-        secs = self._sections()
+        hpf = self._package()
+        for m in (hpf.iter() if hpf is not None else ()):
+            if _local(m.tag) == "title" and (m.text or "").strip():
+                self.doc.meta["title"] = m.text.strip()
+        secs = self._sections(hpf)
         if not secs:
             raise Unsupported("HWPX 패키지에 본문 섹션(Contents/sectionN.xml)이 없습니다.")
         for s in secs:
-            root = _xml(_zip_read(self.z, s))
+            root = _xml(_zip_read(self.z, s, self.budget))
             self.doc.blocks.extend(self._paras(root))
         self.doc.meta["sections"] = len(secs)
         self.doc.images = sorted(n.split("/", 1)[1] for n in names if n.startswith("BinData/"))
@@ -852,9 +910,10 @@ def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
         for p in r.cfb.list("BinData/"):
             raw = r.cfb.read(p)
             try:
-                raw = _inflate(raw, p) if r.compressed else raw
+                if r.compressed and not _looks_stored(raw):
+                    raw = _inflate(raw, p, doc.budget)
             except (zlib.error, ValueError):
-                pass  # some BinData entries are stored uncompressed
+                pass  # not a valid deflate stream: keep the stored bytes (the failed attempt was charged)
             dst = _safe_dest(outdir, p)
             if dst is None:
                 continue
@@ -869,7 +928,7 @@ def save_images(path: str, doc: Doc, outdir: str) -> List[str]:
                 if dst is None:
                     continue
                 with open(dst, "wb") as f:
-                    f.write(_zip_read(z, n))
+                    f.write(_zip_read(z, n, doc.budget))
                 written.append(dst)
     return written
 
@@ -922,7 +981,7 @@ def cmd_render(a) -> int:
     elif kind == "hwpx":
         z = zipfile.ZipFile(a.file)
         n = next((n for n in z.namelist() if n.startswith("Preview/PrvImage")), None)
-        img = _zip_read(z, n) if n else None
+        img = _zip_read(z, n, _Budget()) if n else None
     if not img:
         sys.stderr.write("rhwp가 없고 문서에 미리보기 이미지도 없습니다.\n")
         return 3

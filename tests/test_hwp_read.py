@@ -242,7 +242,143 @@ class Fixtures(unittest.TestCase):
         c = zlib.compressobj(wbits=-15)
         raw = c.compress(b"complete paragraph text " * 20) + c.flush()
         with self.assertRaises(ValueError):
-            h._inflate(raw[: len(raw) // 2], "BodyText/Section0")
+            h._inflate(raw[: len(raw) // 2], "BodyText/Section0", h._Budget())
+
+    def test_document_budget_spans_hwpx_parts(self):
+        p = os.path.join(FIX, "sk-openinno-form.hwpx")
+        read_by_load = {"mimetype", "META-INF/manifest.xml", "Contents/content.hpf",
+                        "Preview/PrvText.txt", "Contents/section0.xml"}
+        with zipfile.ZipFile(p) as z:
+            largest = max(i.file_size for i in z.infolist() if i.filename in read_by_load)
+        orig = h.MAX_DOC_BYTES
+        h.MAX_DOC_BYTES = largest + 1  # every single part fits; their sum does not
+        self.addCleanup(setattr, h, "MAX_DOC_BYTES", orig)
+        with self.assertRaises(h.Unsupported):
+            h.load(p)
+
+    def test_document_budget_spans_hwp5_streams(self):
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"x" * 100) + c.flush()
+        budget = h._Budget()
+        budget.left = 150  # room for one 100-byte stream, not two
+        self.assertEqual(len(h._inflate(raw, "BodyText/Section0", budget)), 100)
+        with self.assertRaises(h.Unsupported):
+            h._inflate(raw, "BodyText/Section1", budget)
+
+    def test_exhausted_budget_still_limits(self):
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"x" * 100) + c.flush()
+        budget = h._Budget()
+        budget.left = 100  # the first stream spends it exactly; zlib reads max_length=0 as "no limit"
+        h._inflate(raw, "BodyText/Section0", budget)
+        with self.assertRaises(h.Unsupported):
+            h._inflate(raw, "BodyText/Section1", budget)
+
+    def test_failed_inflation_is_charged(self):
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"complete paragraph text " * 20) + c.flush()
+        budget = h._Budget()
+        before = budget.left
+        with self.assertRaises(ValueError):
+            h._inflate(raw[: len(raw) // 2], "BinData/BIN0001.bmp", budget)
+        self.assertLess(budget.left, before)
+
+    def test_inflation_charged_before_zlib_error(self):
+        orig = h.INFLATE_CHUNK
+        h.INFLATE_CHUNK = 64
+        self.addCleanup(setattr, h, "INFLATE_CHUNK", orig)
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"x" * 1000) + c.flush(zlib.Z_SYNC_FLUSH) + b"\x06"  # valid prefix, then a reserved block type
+        budget = h._Budget()
+        before = budget.left
+        with self.assertRaises(zlib.error):
+            h._inflate(raw, "BinData/BIN0001.bmp", budget)
+        self.assertLessEqual(budget.left, before - (1000 - h.INFLATE_CHUNK))
+
+    def test_sub_chunk_zlib_failure_is_charged(self):
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"x" * 100) + c.flush(zlib.Z_SYNC_FLUSH) + b"\x06"  # fails inside the first chunk
+        budget = h._Budget()
+        before = budget.left
+        with self.assertRaises(zlib.error):
+            h._inflate(raw, "BinData/BIN0001.bmp", budget)
+        self.assertGreaterEqual(before - budget.left, 100)
+
+    def test_overcharged_budget_refuses_further_reads(self):
+        c = zlib.compressobj(wbits=-15)
+        bad = c.compress(b"x" * 10) + c.flush(zlib.Z_SYNC_FLUSH) + b"\x06"
+        c = zlib.compressobj(wbits=-15)
+        good = c.compress(b"y" * 1000) + c.flush()
+        budget = h._Budget()
+        budget.left = 50
+        with self.assertRaises(zlib.error):
+            h._inflate(bad, "BinData/BIN0001.bmp", budget)  # charges want = 51, leaving -1
+        self.assertEqual(budget.left, -1)
+        with self.assertRaises(h.Unsupported):
+            h._inflate(good, "BinData/BIN0002.bmp", budget)
+        self.assertEqual(budget.left, -1)  # refused before inflating anything, not after
+        z = zipfile.ZipFile(os.path.join(FIX, "sk-openinno-form.hwpx"))
+        with self.assertRaises(h.Unsupported):
+            h._zip_read(z, "mimetype", budget)
+
+    def test_small_stored_entry_failure_charges_little(self):
+        stored = b"\x01\x00\x09\x00" + b"\x00" * 60  # WMF-like bytes, not a deflate stream
+        budget = h._Budget()
+        before = budget.left
+        with self.assertRaises(zlib.error):
+            h._inflate(stored, "BinData/BIN0005.wmf", budget)
+        charged = before - budget.left
+        self.assertEqual(charged, h._inflate_bound(len(stored)))
+        self.assertLess(charged, h.INFLATE_CHUNK // 10)
+
+    def test_stored_image_signatures(self):
+        for head in (b"\xff\xd8\xff\xe0", b"\x89PNG\r\n\x1a\n", b"GIF89a", b"BM\x36\x00"):
+            self.assertTrue(h._looks_stored(head + b"rest"), head)
+        c = zlib.compressobj(wbits=-15)
+        self.assertFalse(h._looks_stored(c.compress(b"x" * 100) + c.flush()))
+
+    def test_chunked_inflation_restores_whole_stream(self):
+        orig = h.INFLATE_CHUNK
+        h.INFLATE_CHUNK = 64
+        self.addCleanup(setattr, h, "INFLATE_CHUNK", orig)
+        payload = bytes(range(256)) * 40
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(payload) + c.flush()
+        budget = h._Budget()
+        before = budget.left
+        self.assertEqual(h._inflate(raw, "BodyText/Section0", budget), payload)
+        self.assertEqual(before - budget.left, len(payload))
+
+    def test_images_share_the_document_budget(self):
+        p = os.path.join(FIX, "sk-openinno-form.hwpx")
+        doc = h.load(p)
+        doc.budget.left = 10  # parsing spent the rest; the BinData images do not fit
+        with self.assertRaises(h.Unsupported):
+            h.save_images(p, doc, os.path.join(self.tmp, "images"))
+
+    def test_hwpx_package_read_once(self):
+        reads = []
+        orig = h._zip_read
+
+        def counting(z, name, budget):
+            reads.append(name)
+            return orig(z, name, budget)
+
+        h._zip_read = counting
+        self.addCleanup(setattr, h, "_zip_read", orig)
+        h.load(os.path.join(FIX, "sk-openinno-form.hwpx"))
+        self.assertEqual(reads.count("Contents/content.hpf"), 1)
+
+    def test_trailing_partial_record_header_is_a_parse_error(self):
+        record = struct.pack("<I", h.TAG_PARA_TEXT | (2 << 20)) + b"ab"
+        self.assertEqual(len(h._records(record)), 1)
+        with self.assertRaises(ValueError):
+            h._records(record + b"\x01\x02")
+
+    def test_record_overrunning_section_is_a_parse_error(self):
+        header = struct.pack("<I", h.TAG_PARA_TEXT | (100 << 20))  # declares 100 bytes
+        with self.assertRaises(ValueError):
+            h._records(header + b"x" * 10)
 
     def test_hwp5_without_body_section_rejected(self):
         data = bytearray(_read(os.path.join(FIX, "e-phi-design.hwp")))

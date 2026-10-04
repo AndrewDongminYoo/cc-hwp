@@ -548,7 +548,7 @@ class Fixtures(unittest.TestCase):
 
     def test_non_finite_border_width_falls_back(self):
         src = os.path.join(FIX, "sk-openinno-form.hwpx")
-        for bad in (b"nan mm", b"inf mm"):
+        for bad in (b"nan mm", b"inf mm", b"1e308 mm"):  # the last is finite but overflows in points
             p = os.path.join(self.tmp, "bad.hwpx")
             with zipfile.ZipFile(src) as zin, zipfile.ZipFile(p, "w") as zout:
                 for n in zin.namelist():
@@ -559,7 +559,8 @@ class Fixtures(unittest.TestCase):
             doc = h.load(p)
             h.to_docx(doc)  # no ValueError/OverflowError from the width conversion
             cells = list(self._ir_cells(doc.blocks))
-            self.assertTrue(any(c.borders is None for c in cells), bad)
+            if bad != b"1e308 mm":
+                self.assertTrue(any(c.borders is None for c in cells), bad)
 
     def test_docx_refuses_oversized_grids(self):
         big = h.MAX_GRID_CELLS + 1

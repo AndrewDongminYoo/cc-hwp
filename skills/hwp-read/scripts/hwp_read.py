@@ -574,11 +574,12 @@ def _local(tag: str) -> str:
 
 
 def _width_mm(text: str) -> float:
-    """A width such as "0.12 mm" in mm; nan, inf and non-positive widths are invalid."""
+    """A width such as "0.12 mm" in mm, capped at Hancom's widest line so later unit
+    conversion cannot overflow; nan, inf and non-positive widths are invalid."""
     mm = float(text.split()[0])
     if not 0 < mm < float("inf"):
         raise ValueError(f"line width {text!r}")
-    return mm
+    return min(mm, HWP5_LINE_MM[-1])
 
 
 def _outer_sublists(el) -> list:

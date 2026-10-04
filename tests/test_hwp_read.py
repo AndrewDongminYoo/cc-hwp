@@ -242,7 +242,33 @@ class Fixtures(unittest.TestCase):
         c = zlib.compressobj(wbits=-15)
         raw = c.compress(b"complete paragraph text " * 20) + c.flush()
         with self.assertRaises(ValueError):
-            h._inflate(raw[: len(raw) // 2], "BodyText/Section0")
+            h._inflate(raw[: len(raw) // 2], "BodyText/Section0", h._Budget())
+
+    def test_document_budget_spans_hwpx_parts(self):
+        p = os.path.join(FIX, "sk-openinno-form.hwpx")
+        read_by_load = {"mimetype", "META-INF/manifest.xml", "Contents/content.hpf",
+                        "Preview/PrvText.txt", "Contents/section0.xml"}
+        with zipfile.ZipFile(p) as z:
+            largest = max(i.file_size for i in z.infolist() if i.filename in read_by_load)
+        orig = h.MAX_DOC_BYTES
+        h.MAX_DOC_BYTES = largest + 1  # every single part fits; their sum does not
+        self.addCleanup(setattr, h, "MAX_DOC_BYTES", orig)
+        with self.assertRaises(h.Unsupported):
+            h.load(p)
+
+    def test_document_budget_spans_hwp5_streams(self):
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"x" * 100) + c.flush()
+        budget = h._Budget()
+        budget.left = 150  # room for one 100-byte stream, not two
+        self.assertEqual(len(h._inflate(raw, "BodyText/Section0", budget)), 100)
+        with self.assertRaises(h.Unsupported):
+            h._inflate(raw, "BodyText/Section1", budget)
+
+    def test_record_overrunning_section_is_a_parse_error(self):
+        header = struct.pack("<I", h.TAG_PARA_TEXT | (100 << 20))  # declares 100 bytes
+        with self.assertRaises(ValueError):
+            h._records(header + b"x" * 10)
 
     def test_hwp5_without_body_section_rejected(self):
         data = bytearray(_read(os.path.join(FIX, "e-phi-design.hwp")))

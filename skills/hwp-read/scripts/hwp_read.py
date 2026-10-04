@@ -58,7 +58,11 @@ class _Budget:
     def __init__(self):
         self.left = MAX_DOC_BYTES
 
-    def limit(self) -> int:
+    def limit(self, what: str) -> int:
+        # Refuse here, before any read: a zero or negative limit would reach zlib as
+        # max_length=0, which means "no limit".
+        if self.left <= 0:
+            raise _too_large(what, 0)
         return min(MAX_PART_BYTES, self.left)
 
     def spend(self, n: int) -> None:
@@ -71,7 +75,7 @@ def _too_large(what: str, limit: int) -> Unsupported:
 
 
 def _inflate(raw: bytes, what: str, budget: _Budget) -> bytes:
-    limit = budget.limit()
+    limit = budget.limit(what)
     d = zlib.decompressobj(-15)
     out = bytearray()
     data = raw
@@ -97,7 +101,7 @@ def _inflate(raw: bytes, what: str, budget: _Budget) -> bytes:
 
 
 def _zip_read(z: zipfile.ZipFile, name: str, budget: _Budget) -> bytes:
-    limit = budget.limit()
+    limit = budget.limit(name)
     with z.open(name) as f:
         data = f.read(limit + 1)
     if len(data) > limit:

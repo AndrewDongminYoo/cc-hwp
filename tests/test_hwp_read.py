@@ -304,6 +304,23 @@ class Fixtures(unittest.TestCase):
             h._inflate(raw, "BinData/BIN0001.bmp", budget)
         self.assertGreaterEqual(before - budget.left, 100)
 
+    def test_overcharged_budget_refuses_further_reads(self):
+        c = zlib.compressobj(wbits=-15)
+        bad = c.compress(b"x" * 10) + c.flush(zlib.Z_SYNC_FLUSH) + b"\x06"
+        c = zlib.compressobj(wbits=-15)
+        good = c.compress(b"y" * 1000) + c.flush()
+        budget = h._Budget()
+        budget.left = 50
+        with self.assertRaises(zlib.error):
+            h._inflate(bad, "BinData/BIN0001.bmp", budget)  # charges want = 51, leaving -1
+        self.assertEqual(budget.left, -1)
+        with self.assertRaises(h.Unsupported):
+            h._inflate(good, "BinData/BIN0002.bmp", budget)
+        self.assertEqual(budget.left, -1)  # refused before inflating anything, not after
+        z = zipfile.ZipFile(os.path.join(FIX, "sk-openinno-form.hwpx"))
+        with self.assertRaises(h.Unsupported):
+            h._zip_read(z, "mimetype", budget)
+
     def test_stored_image_signatures(self):
         for head in (b"\xff\xd8\xff\xe0", b"\x89PNG\r\n\x1a\n", b"GIF89a", b"BM\x36\x00"):
             self.assertTrue(h._looks_stored(head + b"rest"), head)

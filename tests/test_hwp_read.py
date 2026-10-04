@@ -274,6 +274,25 @@ class Fixtures(unittest.TestCase):
         with self.assertRaises(h.Unsupported):
             h._inflate(raw, "BodyText/Section1", budget)
 
+    def test_hwpx_package_read_once(self):
+        reads = []
+        orig = h._zip_read
+
+        def counting(z, name, budget):
+            reads.append(name)
+            return orig(z, name, budget)
+
+        h._zip_read = counting
+        self.addCleanup(setattr, h, "_zip_read", orig)
+        h.load(os.path.join(FIX, "sk-openinno-form.hwpx"))
+        self.assertEqual(reads.count("Contents/content.hpf"), 1)
+
+    def test_trailing_partial_record_header_is_a_parse_error(self):
+        record = struct.pack("<I", h.TAG_PARA_TEXT | (2 << 20)) + b"ab"
+        self.assertEqual(len(h._records(record)), 1)
+        with self.assertRaises(ValueError):
+            h._records(record + b"\x01\x02")
+
     def test_record_overrunning_section_is_a_parse_error(self):
         header = struct.pack("<I", h.TAG_PARA_TEXT | (100 << 20))  # declares 100 bytes
         with self.assertRaises(ValueError):

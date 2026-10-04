@@ -271,6 +271,8 @@ def _records(buf: bytes) -> List[Rec]:
             raise ValueError(f"레코드(tag {tag:#x})가 섹션 끝을 넘습니다 (손상되었거나 잘린 문서).")
         out.append(Rec(tag, level, buf[i:i + size]))
         i += size
+    if i != len(buf):
+        raise ValueError(f"섹션 끝에 불완전한 레코드 헤더 {len(buf) - i}바이트가 있습니다 (잘린 문서).")
     return out
 
 
@@ -518,19 +520,23 @@ class HwpxReader:
         self.doc = Doc("hwpx")
         self.doc.meta["mimetype"] = mime
 
-    def _sections(self) -> List[str]:
-        names = self.z.namelist()
+    def _package(self):
+        """content.hpf parsed once (it is charged to the budget), or None if absent or unreadable."""
         try:
-            hpf = _xml(_zip_read(self.z, "Contents/content.hpf", self.budget))
+            return _xml(_zip_read(self.z, "Contents/content.hpf", self.budget))
+        except Unsupported:
+            raise
+        except Exception:
+            return None
+
+    def _sections(self, hpf) -> List[str]:
+        names = self.z.namelist()
+        if hpf is not None:
             items = {i.get("id"): i.get("href") for i in hpf.iter() if _local(i.tag) == "item"}
             spine = [items.get(r.get("idref")) for r in hpf.iter() if _local(r.tag) == "itemref"]
             secs = [s for s in spine if s and re.search(r"section\d+\.xml$", s)]
             if secs:
                 return [s if s in names else "Contents/" + s.split("/")[-1] for s in secs]
-        except Unsupported:
-            raise
-        except Exception:
-            pass
         return sorted((n for n in names if re.match(r"Contents/section\d+\.xml$", n)),
                       key=lambda s: int(re.findall(r"\d+", s)[-1]))
 
@@ -544,16 +550,11 @@ class HwpxReader:
                     break
                 except UnicodeDecodeError:
                     continue
-        try:
-            hpf = _xml(_zip_read(self.z, "Contents/content.hpf", self.budget))
-            for m in hpf.iter():
-                if _local(m.tag) == "title" and (m.text or "").strip():
-                    self.doc.meta["title"] = m.text.strip()
-        except Unsupported:
-            raise
-        except Exception:
-            pass
-        secs = self._sections()
+        hpf = self._package()
+        for m in (hpf.iter() if hpf is not None else ()):
+            if _local(m.tag) == "title" and (m.text or "").strip():
+                self.doc.meta["title"] = m.text.strip()
+        secs = self._sections(hpf)
         if not secs:
             raise Unsupported("HWPX 패키지에 본문 섹션(Contents/sectionN.xml)이 없습니다.")
         for s in secs:

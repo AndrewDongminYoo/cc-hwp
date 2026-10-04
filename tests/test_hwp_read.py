@@ -1,4 +1,5 @@
 """Regression tests: run with `python3 -m unittest discover tests` (stdlib only)."""
+import argparse
 import collections
 import html
 import io
@@ -458,6 +459,17 @@ class Fixtures(unittest.TestCase):
             doc = h.Doc("hwpx", blocks=[h.Table(1, 1, [cell])])
             with self.assertRaises(h.Unsupported):
                 h.to_docx(doc)
+
+    def test_failed_convert_keeps_existing_output(self):
+        out = os.path.join(self.tmp, "existing.docx")
+        with open(out, "wb") as f:
+            f.write(b"previous result")
+        orig = h.MAX_DOCX_GRID_CELLS
+        h.MAX_DOCX_GRID_CELLS = 1  # make the conversion fail after parsing succeeds
+        self.addCleanup(setattr, h, "MAX_DOCX_GRID_CELLS", orig)
+        with self.assertRaises(h.Unsupported):
+            h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"), output=out, to="docx"))
+        self.assertEqual(_read(out), b"previous result")
 
     def test_docx_output_is_deterministic(self):
         doc = h.load(os.path.join(FIX, "sk-openinno-form.hwpx"))

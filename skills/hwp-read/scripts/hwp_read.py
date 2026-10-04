@@ -1119,8 +1119,9 @@ def cmd_render(a) -> int:
 def cmd_convert(a) -> int:
     doc = load(a.file)
     out = a.output or os.path.splitext(os.path.basename(a.file))[0] + ".docx"
+    data = to_docx(doc)  # build fully first: opening with "wb" would empty an existing file on failure
     with open(out, "wb") as f:
-        f.write(to_docx(doc))
+        f.write(data)
     st = stats(doc, to_markdown(doc))
     print(json.dumps({"format": "docx", "output": out, "tables": st["tables"], "merged_tables": st["merged_tables"],
                       "preview_coverage": st["preview_coverage"], "warnings": st["warnings"],

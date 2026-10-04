@@ -11,8 +11,8 @@
     {
       "name": "cc-hwp",
       "source": "./",
-      "description": "Read Korean Hangul .hwp/.hwpx documents as Markdown without Hancom Office or PDF conversion.",
-      "version": "0.1.0"
+      "description": "Read Korean Hangul .hwp/.hwpx documents as Markdown and convert them to Word (.docx) without Hancom Office.",
+      "version": "0.1.1"
     }
   ]
 }

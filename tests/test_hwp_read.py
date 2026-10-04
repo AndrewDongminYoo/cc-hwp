@@ -185,7 +185,7 @@ class Fixtures(unittest.TestCase):
             '</hp:drawText></hp:rect></hp:run></hp:p>'
         )
         r = h.HwpxReader.__new__(h.HwpxReader)
-        r.doc = h.Doc("hwpx")
+        r.doc, r.fills = h.Doc("hwpx"), {}
         r.doc.blocks = r._para(h.ET.fromstring(xml))
         self.assertEqual(h.to_markdown(r.doc).count("CELLTEXT"), 1)
 
@@ -456,6 +456,111 @@ class Fixtures(unittest.TestCase):
         for tc in root.iter(f"{W}tc"):
             self.assertEqual(tc[-1].tag, f"{W}p")  # Word rejects a cell whose last child is not a paragraph
 
+    def _ir_cells(self, blocks):
+        """Cells in document order: a cell before the tables nested in it."""
+        for b in blocks:
+            if isinstance(b, h.Table):
+                for c in b.cells:
+                    yield c
+                    yield from self._ir_cells(c.blocks)
+
+    @staticmethod
+    def _asymmetric(sides):
+        return any(s is None for s in sides) and any(s is not None for s in sides)
+
+    def test_docx_cell_borders_per_side(self):
+        # top thick, left none, bottom none, right thin: a swapped side cannot pass
+        a = h.Cell(0, 0, 2, 1, [h.Para("A")], borders=(0.4, None, None, 0.1))
+        b = h.Cell(0, 1, 1, 1, [h.Para("B")])  # no border information: table default applies
+        c = h.Cell(1, 1, 1, 1, [h.Para("C")], borders=(None, None, None, None))
+        z = zipfile.ZipFile(io.BytesIO(h.to_docx(h.Doc("hwp5", blocks=[h.Table(2, 2, [a, b, c])]))))
+        root = ET.fromstring(z.read("word/document.xml"))
+        rows = [tr.findall(f"{W}tc") for tr in root.iter(f"{W}tr")]
+
+        def sides(tc):
+            tb = tc.find(f"{W}tcPr/{W}tcBorders")
+            return None if tb is None else [(_local(s.tag), s.get(f"{W}val"), s.get(f"{W}sz")) for s in tb]
+
+        def _local(tag):
+            return tag.rsplit("}", 1)[-1]
+
+        want_a = [("top", "single", "9"), ("left", "nil", None), ("bottom", "nil", None), ("right", "single", "2")]
+        self.assertEqual(sides(rows[0][0]), want_a)
+        self.assertEqual(sides(rows[1][0]), want_a)  # the vMerge continuation repeats its owner
+        self.assertIsNone(sides(rows[0][1]))
+        self.assertEqual([v for _, v, _ in sides(rows[1][1])], ["nil"] * 4)
+        tcpr = rows[0][0].find(f"{W}tcPr")
+        self.assertEqual([_local(e.tag) for e in tcpr], ["vMerge", "tcBorders"])  # schema order
+
+    def test_hwpx_cell_borders_follow_header(self):
+        path = os.path.join(FIX, "sk-openinno-form.hwpx")
+        z = zipfile.ZipFile(path)
+        fills = {}
+        for bf in ET.fromstring(z.read("Contents/header.xml")).iter():
+            if bf.tag.endswith("}borderFill"):
+                side = {s.tag.rsplit("}", 1)[-1]: s for s in bf}
+                fills[bf.get("id")] = tuple(
+                    None if side[k].get("type") == "NONE" else float(side[k].get("width").split()[0])
+                    for k in ("topBorder", "leftBorder", "bottomBorder", "rightBorder"))
+        want = [fills[tc.get("borderFillIDRef")]
+                for tc in ET.fromstring(z.read("Contents/section0.xml")).iter() if tc.tag.endswith("}tc")]
+        got = [c.borders for c in self._ir_cells(h.load(path).blocks)]
+        self.assertEqual(got, want)
+        self.assertTrue(any(self._asymmetric(s) for s in want))
+
+    def test_hwp5_cell_borders_follow_docinfo(self):
+        path = os.path.join(FIX, "e-phi-design.hwp")
+        r = h.Hwp5Reader(_read(path))
+        mm = (0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0)
+        fills = []
+        for rec in h._records(r._stream("DocInfo")):
+            if rec.tag == 0x14:  # BORDER_FILL: attribute UINT16, then left, right, top, bottom
+                lrtb = [struct.unpack_from("<BB", rec.data, 2 + 6 * k) for k in range(4)]
+                fills.append(tuple(None if t == 0 else mm[w] for t, w in (lrtb[2], lrtb[0], lrtb[3], lrtb[1])))
+        want = []
+
+        def walk(nodes):
+            for n in nodes:
+                if n.tag == h.TAG_CTRL_HEADER and h._ctrl_id(n.data) == "tbl ":
+                    for ch in n.children:
+                        if ch.tag == h.TAG_LIST_HEADER:
+                            want.append(fills[struct.unpack_from("<H", ch.data, 32)[0] - 1])
+                        else:
+                            walk([ch])
+                else:
+                    walk(n.children)
+
+        walk(h._tree(h._records(r._stream("BodyText/Section0"))))
+        got = [c.borders for c in self._ir_cells(h.load(path).blocks)]
+        self.assertEqual(got, want)
+        self.assertTrue(any(self._asymmetric(s) for s in want))
+
+    def test_missing_border_definitions_fall_back(self):
+        src = os.path.join(FIX, "sk-openinno-form.hwpx")
+        p = os.path.join(self.tmp, "noheader.hwpx")
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(p, "w") as zout:
+            for n in zin.namelist():
+                if n != "Contents/header.xml":
+                    zout.writestr(n, zin.read(n))
+        doc = h.load(p)
+        self.assertTrue(all(c.borders is None for c in self._ir_cells(doc.blocks)))
+        self.assertEqual(h.to_markdown(doc), h.to_markdown(h.load(src)))
+
+    def test_non_finite_border_width_falls_back(self):
+        src = os.path.join(FIX, "sk-openinno-form.hwpx")
+        for bad in (b"nan mm", b"inf mm"):
+            p = os.path.join(self.tmp, "bad.hwpx")
+            with zipfile.ZipFile(src) as zin, zipfile.ZipFile(p, "w") as zout:
+                for n in zin.namelist():
+                    data = zin.read(n)
+                    if n == "Contents/header.xml":  # every drawn line, so cells in use are hit
+                        data = re.sub(rb'(type="SOLID" )width="[^"]*"', rb'\1width="' + bad + b'"', data)
+                    zout.writestr(n, data)
+            doc = h.load(p)
+            h.to_docx(doc)  # no ValueError/OverflowError from the width conversion
+            cells = list(self._ir_cells(doc.blocks))
+            self.assertTrue(any(c.borders is None for c in cells), bad)
+
     def test_docx_refuses_oversized_grids(self):
         big = h.MAX_GRID_CELLS + 1
         for cell in (h.Cell(0, 0, 1, big, [h.Para("x")]), h.Cell(0, 0, big, 1, [h.Para("x")])):
@@ -506,7 +611,7 @@ class Fixtures(unittest.TestCase):
                '<hp:tr><hp:tc><hp:cellAddr colAddr="-1" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/>'
                '<hp:subList><hp:p><hp:run><hp:t>x</hp:t></hp:run></hp:p></hp:subList></hp:tc></hp:tr></hp:tbl>')
         r = h.HwpxReader.__new__(h.HwpxReader)
-        r.doc = h.Doc("hwpx")
+        r.doc, r.fills = h.Doc("hwpx"), {}
         with self.assertRaises(ValueError):
             r._table(h.ET.fromstring(xml))
 

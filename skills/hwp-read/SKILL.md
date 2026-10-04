@@ -1,6 +1,6 @@
 ---
 name: hwp-read
-description: Read Korean Hangul (한글/한컴오피스) documents — .hwp (HWP 5.0) and .hwpx (OWPML) — as Markdown with tables, text boxes and footnotes preserved, and render pages for visual checks. Use whenever the user provides or mentions an .hwp/.hwpx file, a 한글 문서, 공고문, 신청서 양식, or asks to summarize, search, compare or fill in information from one. No Hancom Office, LibreOffice or PDF conversion needed.
+description: Read Korean Hangul (한글/한컴오피스) documents — .hwp (HWP 5.0) and .hwpx (OWPML) — as Markdown with tables, text boxes and footnotes preserved, and render pages for visual checks. Use whenever the user provides or mentions an .hwp/.hwpx file, a 한글 문서, 공고문, 신청서 양식, or asks to summarize, search, compare or fill in information from one, or to convert one to Word (.docx) or PDF. No Hancom Office, LibreOffice or PDF conversion needed.
 ---
 
 # hwp-read
@@ -53,6 +53,14 @@ so it works in any sandbox. All paths below are relative to this SKILL.md's dire
 - Headers/footers and page numbers are dropped.
 - Korean forms often contain empty answer cells (`<td></td>`) — these are blanks to be filled,
   not extraction failures. `□`/`■` are unchecked/checked boxes as typed in the source.
+
+## Converting to Word or PDF
+
+- **Word (.docx):** `python3 scripts/hwp_read.py convert "<file>" --to docx -o out.docx`.
+  Built from the same parse as `extract`, so every table, including one-row layout boxes, stays a Word table with its merged cells.
+  Fonts, sizes, page layout and pictures are not carried over; tell the user the result is an editable structural copy, not a visual replica.
+  Works without `rhwp`. Don't write your own Markdown-to-DOCX converter: Markdown flattens layout boxes, so they come back as plain paragraphs.
+- **PDF:** use `render` above. Only the `rhwp` path gives a layout-faithful PDF; without it, say that a full PDF needs `rhwp` or Hancom/HOP's own export.
 
 ## When the `rhwp` CLI is available
 

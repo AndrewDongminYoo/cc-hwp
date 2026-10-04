@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import collections
 import html
+import io
 import json
 import os
 import re
@@ -27,6 +28,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import zipfile
 import zlib
 import xml.etree.ElementTree as ET
@@ -538,7 +540,6 @@ def _outer_sublists(el) -> list:
 
 class HwpxReader:
     def __init__(self, data: bytes, path: str):
-        import io
         self.z = zipfile.ZipFile(io.BytesIO(data))
         self.budget = _Budget()
         names = set(self.z.namelist())
@@ -682,9 +683,13 @@ class HwpxReader:
                 addr = tc.find(HP + "cellAddr")
                 span = tc.find(HP + "cellSpan")
                 sub = tc.find(HP + "subList")
+                row = int(addr.get("rowAddr", 0)) if addr is not None else 0
+                col = int(addr.get("colAddr", 0)) if addr is not None else 0
+                if row < 0 or col < 0:
+                    raise ValueError(f"표 셀 주소가 음수입니다 (rowAddr={row}, colAddr={col}; 손상된 문서).")
                 cells.append(Cell(
-                    int(addr.get("rowAddr", 0)) if addr is not None else 0,
-                    int(addr.get("colAddr", 0)) if addr is not None else 0,
+                    row,
+                    col,
                     max(int(span.get("rowSpan", 1)), 1) if span is not None else 1,
                     max(int(span.get("colSpan", 1)), 1) if span is not None else 1,
                     self._paras(sub) if sub is not None else [],
@@ -800,6 +805,131 @@ def to_markdown(doc: Doc) -> str:
             out.append(f"[^{i}]: {note}")
     md = "\n".join(out)
     return re.sub(r"\n{3,}", "\n\n", md).strip() + "\n"
+
+
+# ───────────────────────────── DOCX rendering ─────────────────────────────
+# Structure-preserving, not layout-faithful: paragraphs and every table, with its
+# merged cells, carry over from the IR; fonts, sizes, page layout and pictures do not.
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+_TBL_BORDERS = "".join(f'<w:{s} w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+                       for s in ("top", "left", "bottom", "right", "insideH", "insideV"))
+_TEXT_WIDTH = 9638  # twips between A4 margins of 1134 twips (2 cm)
+# Spans come from the document: a single cell can declare a 65,535-column span, and the
+# DOCX grid materializes every slot. Cap the slots one document may produce.
+MAX_DOCX_GRID_CELLS = 500_000
+
+
+class _GridBudget:
+    def __init__(self):
+        self.left = MAX_DOCX_GRID_CELLS
+
+    def spend(self, nrows: int, ncols: int) -> None:
+        self.left -= nrows * ncols
+        if self.left < 0:
+            raise Unsupported(f"표 격자가 너무 큽니다 ({nrows}×{ncols}). 문서 전체 한도 "
+                              f"{MAX_DOCX_GRID_CELLS}칸을 넘어 DOCX로 변환하지 않습니다.")
+
+
+def _docx_para(text: str, indent: bool = False) -> str:
+    runs = []
+    for i, line in enumerate(text.split("\n")):
+        if i:
+            runs.append("<w:br/>")
+        for j, part in enumerate(line.split("\t")):
+            if j:
+                runs.append("<w:tab/>")
+            if part:
+                runs.append(f'<w:t xml:space="preserve">{html.escape(_XML_ILLEGAL.sub("", part), quote=False)}</w:t>')
+    ppr = '<w:pPr><w:ind w:left="567"/></w:pPr>' if indent else ""  # text boxes, like "> " in Markdown
+    return f"<w:p>{ppr}<w:r>{''.join(runs)}</w:r></w:p>" if runs else f"<w:p>{ppr}</w:p>"
+
+
+def _docx_blocks(blocks: List[Block], grid: _GridBudget) -> List[str]:
+    return [_docx_table(b, grid) if isinstance(b, Table) else _docx_para(b.text, b.kind == "textbox")
+            for b in blocks]
+
+
+def _docx_cell(span: int, vmerge: Optional[str], content: List[str]) -> str:
+    props = (f'<w:gridSpan w:val="{span}"/>' if span > 1 else "") + \
+            ('<w:vMerge w:val="restart"/>' if vmerge == "restart" else "<w:vMerge/>" if vmerge else "")
+    body = "".join(content)
+    if not content or content[-1].startswith("<w:tbl"):
+        body += "<w:p/>"  # Word requires every cell to end with a paragraph
+    return f"<w:tc><w:tcPr>{props}</w:tcPr>{body}</w:tc>"
+
+
+def _docx_table(t: Table, grid: _GridBudget) -> str:
+    if not t.cells:
+        grid.spend(1, 1)  # the synthesized one-cell table counts too
+        return f"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol/></w:tblGrid><w:tr>{_docx_cell(1, None, [])}</w:tr></w:tbl>"
+    nrows = max(c.row + c.rowspan for c in t.cells)
+    ncols = max(c.col + c.colspan for c in t.cells)
+    grid.spend(nrows, ncols)  # before anything is built from the spans
+    # One owner per grid slot. Marking stops at the first slot claimed twice, so the work
+    # is bounded by the charged grid even when a document repeats cells with huge spans.
+    owner: dict = {}
+    for c in t.cells:
+        for r in range(c.row, c.row + c.rowspan):
+            for k in range(c.col, c.col + c.colspan):
+                if (r, k) in owner:
+                    raise ValueError(f"표 셀이 서로 겹칩니다 (행 {r}, 열 {k}; 손상된 문서).")
+                owner[(r, k)] = c
+    rows = []
+    for r in range(nrows):
+        tcs, col = [], 0
+        while col < ncols:
+            c = owner.get((r, col))
+            if c is None:  # a hole in a malformed grid
+                tcs.append(_docx_cell(1, None, []))
+                col += 1
+            elif c.row == r:
+                tcs.append(_docx_cell(c.colspan, "restart" if c.rowspan > 1 else None,
+                                      _docx_blocks(c.blocks, grid)))
+                col += c.colspan
+            else:  # continuation of a vertical merge started above
+                tcs.append(_docx_cell(c.colspan, "continue", []))
+                col += c.colspan
+        rows.append("<w:tr>" + "".join(tcs) + "</w:tr>")
+    grid = f'<w:gridCol w:w="{max(_TEXT_WIDTH // ncols, 1)}"/>' * ncols
+    return (f'<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>{_TBL_BORDERS}</w:tblBorders>'
+            f"</w:tblPr><w:tblGrid>{grid}</w:tblGrid>{''.join(rows)}</w:tbl>")
+
+
+def to_docx(doc: Doc) -> bytes:
+    grid = _GridBudget()
+    body = _docx_blocks(doc.blocks, grid)
+    for i, note in enumerate(doc.notes, 1):  # notes as trailing paragraphs, matching the [^n] markers
+        body.append(_docx_para(f"[^{i}]:"))
+        body.extend(_docx_blocks(note, grid))
+    sect = ('<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" '
+            'w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr>')
+    document = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<w:document xmlns:w="{_W_NS}"><w:body>{"".join(body)}{sect}</w:body></w:document>')
+    parts = {
+        "[Content_Types].xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/word/document.xml" ContentType="application/'
+            'vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+        "_rels/.rels": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+        "word/document.xml": document,
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, xml_text in parts.items():
+            # A fixed timestamp makes the same input produce byte-identical output.
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(info, xml_text.encode("utf-8"))
+    return buf.getvalue()
 
 
 # ───────────────────────────── verification ─────────────────────────────
@@ -956,6 +1086,11 @@ def cmd_extract(a) -> int:
     else:
         sys.stdout.write(md)
     sys.stderr.write(json.dumps(st, ensure_ascii=False) + "\n")
+    return _exit_code(st)
+
+
+def _exit_code(st: dict) -> int:
+    """4 when the self-check suspects missing text (shared by extract and convert), else 0."""
     return 4 if st["warnings"] and st.get("preview_coverage") is not None and st["preview_coverage"] < 0.9 else 0
 
 
@@ -994,6 +1129,43 @@ def cmd_render(a) -> int:
     return 0
 
 
+def cmd_convert(a) -> int:
+    doc = load(a.file)
+    out = a.output or os.path.splitext(os.path.basename(a.file))[0] + ".docx"
+    if os.path.exists(out) and os.path.samefile(a.file, out):
+        # Formats are detected by content, so an HWPX named report.docx is valid input and
+        # would otherwise be replaced by its own conversion.
+        sys.stderr.write(json.dumps({"error": "usage", "message": f"출력 경로가 입력 파일과 같습니다: {out}. "
+                                     "-o로 다른 경로를 지정하세요."}, ensure_ascii=False) + "\n")
+        return 2
+    data = to_docx(doc)  # build fully first: a conversion error must not touch the destination
+    # Write a temp file beside the destination and swap it in only after it is complete,
+    # so a failed write (disk full, quota) also leaves an existing file intact.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(out)), prefix=".hwp_read-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        # mkstemp creates 0600: keep an existing file's mode, else use the normal umask-based one.
+        if os.path.exists(out):
+            mode = os.stat(out).st_mode & 0o7777
+        else:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp, mode)
+        os.replace(tmp, out)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    st = stats(doc, to_markdown(doc))
+    print(json.dumps({"format": "docx", "output": out, "tables": st["tables"], "merged_tables": st["merged_tables"],
+                      "preview_coverage": st["preview_coverage"], "warnings": st["warnings"],
+                      "note": "구조(문단·표·병합 셀)만 옮김. 글꼴·쪽 배치·그림은 포함되지 않음"},
+                     ensure_ascii=False))
+    return _exit_code(st)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="hwp_read", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1003,6 +1175,8 @@ def main(argv=None) -> int:
     p.set_defaults(fn=cmd_extract)
     p = sub.add_parser("render"); p.add_argument("file"); p.add_argument("-o", "--output")
     p.add_argument("--page", type=int); p.set_defaults(fn=cmd_render)
+    p = sub.add_parser("convert"); p.add_argument("file"); p.add_argument("--to", choices=["docx"], required=True)
+    p.add_argument("-o", "--output"); p.set_defaults(fn=cmd_convert)
     a = ap.parse_args(argv)
     try:
         return a.fn(a)

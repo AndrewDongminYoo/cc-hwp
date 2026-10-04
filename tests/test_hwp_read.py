@@ -1,16 +1,21 @@
 """Regression tests: run with `python3 -m unittest discover tests` (stdlib only)."""
+import argparse
 import collections
 import html
+import io
 import os
 import re
+import resource
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 import zlib
+import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(__file__)
 SCRIPT = os.path.join(HERE, "..", "skills", "hwp-read", "scripts", "hwp_read.py")
@@ -18,6 +23,7 @@ sys.path.insert(0, os.path.dirname(SCRIPT))
 import hwp_read as h  # noqa: E402
 
 FIX = os.path.join(HERE, "fixtures")
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
 def _read(path):
@@ -399,6 +405,161 @@ class Fixtures(unittest.TestCase):
     def test_multiline_note_stays_in_definition(self):
         doc = h.Doc("hwp5", blocks=[h.Para("body[^1]")], notes=[[h.Para("first\nsecond")]])
         self.assertIn("[^1]: first second", h.to_markdown(doc))
+
+    def _docx_xml(self, name):
+        doc = h.load(os.path.join(FIX, name))
+        z = zipfile.ZipFile(io.BytesIO(h.to_docx(doc)))
+        for part in z.namelist():
+            if part.endswith((".xml", ".rels")):
+                ET.fromstring(z.read(part))  # every part is well-formed
+        return doc, ET.fromstring(z.read("word/document.xml"))
+
+    def _ir_counts(self, blocks, acc=None):
+        acc = acc or {"tables": 0, "colspan": 0, "rowspan": 0}
+        for b in blocks:
+            if isinstance(b, h.Table):
+                acc["tables"] += 1
+                for c in b.cells:
+                    acc["colspan"] += c.colspan > 1
+                    acc["rowspan"] += c.rowspan > 1
+                    self._ir_counts(c.blocks, acc)
+        return acc
+
+    def test_docx_keeps_every_table_and_merge(self):
+        for name in ("e-phi-design.hwp", "sk-openinno-form.hwpx"):
+            doc, root = self._docx_xml(name)
+            starts = []  # cells that begin a merge region (a vMerge continuation repeats its gridSpan)
+            for tc in root.iter(f"{W}tc"):
+                vm = tc.find(f"{W}tcPr/{W}vMerge")
+                if vm is None or vm.get(f"{W}val") == "restart":
+                    starts.append(tc)
+            got = {
+                "tables": len(root.findall(f".//{W}tbl")),
+                "colspan": sum(1 for tc in starts
+                               if int(tc.find(f"{W}tcPr/{W}gridSpan").get(f"{W}val", "1")
+                                      if tc.find(f"{W}tcPr/{W}gridSpan") is not None else 1) > 1),
+                "rowspan": sum(1 for v in root.iter(f"{W}vMerge") if v.get(f"{W}val") == "restart"),
+            }
+            self.assertEqual(got, self._ir_counts(doc.blocks), name)
+
+    def test_docx_keeps_every_character(self):
+        for name in ("e-phi-design.hwp", "sk-openinno-form.hwpx"):
+            doc, root = self._docx_xml(name)
+            out = _chars("".join(t.text or "" for t in root.iter(f"{W}t")))
+            missing = _md_chars(h.to_markdown(doc)) - out
+            self.assertFalse(missing, f"{name}: {dict(missing.most_common(10))}")
+
+    def test_docx_cells_end_with_a_paragraph(self):
+        _, root = self._docx_xml("e-phi-design.hwp")
+        for tc in root.iter(f"{W}tc"):
+            self.assertEqual(tc[-1].tag, f"{W}p")  # Word rejects a cell whose last child is not a paragraph
+
+    def test_docx_refuses_oversized_grids(self):
+        big = h.MAX_DOCX_GRID_CELLS + 1
+        for cell in (h.Cell(0, 0, 1, big, [h.Para("x")]), h.Cell(0, 0, big, 1, [h.Para("x")])):
+            doc = h.Doc("hwpx", blocks=[h.Table(1, 1, [cell])])
+            with self.assertRaises(h.Unsupported):
+                h.to_docx(doc)
+
+    def test_convert_refuses_to_overwrite_its_source(self):
+        src = os.path.join(self.tmp, "report.docx")  # an HWPX named like the default output
+        shutil.copy(os.path.join(FIX, "sk-openinno-form.hwpx"), src)
+        before = _read(src)
+        r = subprocess.run([sys.executable, os.path.abspath(SCRIPT), "convert", "report.docx", "--to", "docx"],
+                           capture_output=True, text=True, cwd=self.tmp)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual(_read(src), before)
+
+    def test_hwpx_negative_cell_address_is_a_parse_error(self):
+        xml = ('<hp:tbl xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" rowCnt="1" colCnt="1">'
+               '<hp:tr><hp:tc><hp:cellAddr colAddr="-1" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/>'
+               '<hp:subList><hp:p><hp:run><hp:t>x</hp:t></hp:run></hp:p></hp:subList></hp:tc></hp:tr></hp:tbl>')
+        r = h.HwpxReader.__new__(h.HwpxReader)
+        r.doc = h.Doc("hwpx")
+        with self.assertRaises(ValueError):
+            r._table(h.ET.fromstring(xml))
+
+    def test_failed_convert_keeps_existing_output(self):
+        out = os.path.join(self.tmp, "existing.docx")
+        with open(out, "wb") as f:
+            f.write(b"previous result")
+        orig = h.MAX_DOCX_GRID_CELLS
+        h.MAX_DOCX_GRID_CELLS = 1  # make the conversion fail after parsing succeeds
+        self.addCleanup(setattr, h, "MAX_DOCX_GRID_CELLS", orig)
+        with self.assertRaises(h.Unsupported):
+            h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"), output=out, to="docx"))
+        self.assertEqual(_read(out), b"previous result")
+
+    def test_failed_write_keeps_existing_output(self):
+        out = os.path.join(self.tmp, "existing.docx")
+        with open(out, "wb") as f:
+            f.write(b"previous result")
+
+        def small_file_limit():  # a real write failure (EFBIG) once output passes 1000 bytes
+            resource.setrlimit(resource.RLIMIT_FSIZE, (1000, 1000))
+
+        r = subprocess.run([sys.executable, SCRIPT, "convert", os.path.join(FIX, "sk-openinno-form.hwpx"),
+                            "--to", "docx", "-o", out], capture_output=True, text=True, preexec_fn=small_file_limit)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(_read(out), b"previous result")
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["existing.docx"])  # no temp file left behind
+
+    def test_convert_output_has_normal_permissions(self):
+        out = os.path.join(self.tmp, "fresh.docx")
+        h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"), output=out, to="docx"))
+        umask = os.umask(0)
+        os.umask(umask)
+        self.assertEqual(os.stat(out).st_mode & 0o777, 0o666 & ~umask)  # not mkstemp's 0600
+
+    def test_convert_keeps_existing_output_permissions(self):
+        out = os.path.join(self.tmp, "private.docx")
+        with open(out, "wb") as f:
+            f.write(b"old")
+        os.chmod(out, 0o600)
+        h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"), output=out, to="docx"))
+        self.assertEqual(os.stat(out).st_mode & 0o777, 0o600)
+
+    def test_docx_output_is_deterministic(self):
+        doc = h.load(os.path.join(FIX, "sk-openinno-form.hwpx"))
+        first = h.to_docx(doc)
+        time.sleep(2.1)  # a ZIP timestamp has 2-second resolution; always cross a tick boundary
+        self.assertEqual(first, h.to_docx(doc))
+
+    def test_docx_rejects_overlapping_cells(self):
+        dup = [h.Cell(0, 0, 500, 1, [h.Para("x")]) for _ in range(1000)]  # same slot, large rowspan
+        with self.assertRaises(ValueError):
+            h.to_docx(h.Doc("hwpx", blocks=[h.Table(500, 1, dup)]))
+
+    def test_empty_tables_are_charged_to_the_grid(self):
+        orig = h.MAX_DOCX_GRID_CELLS
+        h.MAX_DOCX_GRID_CELLS = 3
+        self.addCleanup(setattr, h, "MAX_DOCX_GRID_CELLS", orig)
+        doc = h.Doc("hwpx", blocks=[h.Table(0, 0, []) for _ in range(4)])
+        with self.assertRaises(h.Unsupported):
+            h.to_docx(doc)
+
+    def test_cli_convert_reports_low_coverage(self):
+        src = os.path.join(FIX, "sk-openinno-form.hwpx")
+        p = os.path.join(self.tmp, "stale-preview.hwpx")
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(p, "w") as zout:
+            for info in zin.infolist():
+                data = zin.read(info.filename)
+                if info.filename == "Preview/PrvText.txt":
+                    data = "\r\n".join(f"<본문에 없는 미리보기 줄 {i}>" for i in range(20)).encode("utf-8")
+                zout.writestr(info, data)
+        r = subprocess.run([sys.executable, SCRIPT, "convert", p, "--to", "docx", "-o",
+                            os.path.join(self.tmp, "out.docx")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("preview_coverage", r.stdout)
+
+    def test_cli_convert_docx(self):
+        out = os.path.join(self.tmp, "form.docx")
+        r = subprocess.run([sys.executable, SCRIPT, "convert", os.path.join(FIX, "sk-openinno-form.hwpx"),
+                            "--to", "docx", "-o", out], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if shutil.which("textutil"):  # macOS: an independent DOCX reader
+            txt = subprocess.run(["textutil", "-convert", "txt", "-stdout", out], capture_output=True, text=True)
+            self.assertIn("참가신청서", txt.stdout)
 
     def test_cli_exit_codes(self):
         r = subprocess.run([sys.executable, SCRIPT, "extract", os.path.join(FIX, "e-phi-design.hwp")],

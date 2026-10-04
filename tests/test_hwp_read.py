@@ -460,6 +460,24 @@ class Fixtures(unittest.TestCase):
             with self.assertRaises(h.Unsupported):
                 h.to_docx(doc)
 
+    def test_convert_refuses_to_overwrite_its_source(self):
+        src = os.path.join(self.tmp, "report.docx")  # an HWPX named like the default output
+        shutil.copy(os.path.join(FIX, "sk-openinno-form.hwpx"), src)
+        before = _read(src)
+        r = subprocess.run([sys.executable, os.path.abspath(SCRIPT), "convert", "report.docx", "--to", "docx"],
+                           capture_output=True, text=True, cwd=self.tmp)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual(_read(src), before)
+
+    def test_hwpx_negative_cell_address_is_a_parse_error(self):
+        xml = ('<hp:tbl xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" rowCnt="1" colCnt="1">'
+               '<hp:tr><hp:tc><hp:cellAddr colAddr="-1" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/>'
+               '<hp:subList><hp:p><hp:run><hp:t>x</hp:t></hp:run></hp:p></hp:subList></hp:tc></hp:tr></hp:tbl>')
+        r = h.HwpxReader.__new__(h.HwpxReader)
+        r.doc = h.Doc("hwpx")
+        with self.assertRaises(ValueError):
+            r._table(h.ET.fromstring(xml))
+
     def test_failed_convert_keeps_existing_output(self):
         out = os.path.join(self.tmp, "existing.docx")
         with open(out, "wb") as f:

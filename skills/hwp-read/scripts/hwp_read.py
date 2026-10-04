@@ -682,9 +682,13 @@ class HwpxReader:
                 addr = tc.find(HP + "cellAddr")
                 span = tc.find(HP + "cellSpan")
                 sub = tc.find(HP + "subList")
+                row = int(addr.get("rowAddr", 0)) if addr is not None else 0
+                col = int(addr.get("colAddr", 0)) if addr is not None else 0
+                if row < 0 or col < 0:
+                    raise ValueError(f"표 셀 주소가 음수입니다 (rowAddr={row}, colAddr={col}; 손상된 문서).")
                 cells.append(Cell(
-                    int(addr.get("rowAddr", 0)) if addr is not None else 0,
-                    int(addr.get("colAddr", 0)) if addr is not None else 0,
+                    row,
+                    col,
                     max(int(span.get("rowSpan", 1)), 1) if span is not None else 1,
                     max(int(span.get("colSpan", 1)), 1) if span is not None else 1,
                     self._paras(sub) if sub is not None else [],
@@ -1119,6 +1123,12 @@ def cmd_render(a) -> int:
 def cmd_convert(a) -> int:
     doc = load(a.file)
     out = a.output or os.path.splitext(os.path.basename(a.file))[0] + ".docx"
+    if os.path.exists(out) and os.path.samefile(a.file, out):
+        # Formats are detected by content, so an HWPX named report.docx is valid input and
+        # would otherwise be replaced by its own conversion.
+        sys.stderr.write(json.dumps({"error": "usage", "message": f"출력 경로가 입력 파일과 같습니다: {out}. "
+                                     "-o로 다른 경로를 지정하세요."}, ensure_ascii=False) + "\n")
+        return 2
     data = to_docx(doc)  # build fully first: opening with "wb" would empty an existing file on failure
     with open(out, "wb") as f:
         f.write(data)

@@ -321,6 +321,16 @@ class Fixtures(unittest.TestCase):
         with self.assertRaises(h.Unsupported):
             h._zip_read(z, "mimetype", budget)
 
+    def test_small_stored_entry_failure_charges_little(self):
+        stored = b"\x01\x00\x09\x00" + b"\x00" * 60  # WMF-like bytes, not a deflate stream
+        budget = h._Budget()
+        before = budget.left
+        with self.assertRaises(zlib.error):
+            h._inflate(stored, "BinData/BIN0005.wmf", budget)
+        charged = before - budget.left
+        self.assertEqual(charged, h._inflate_bound(len(stored)))
+        self.assertLess(charged, h.INFLATE_CHUNK // 10)
+
     def test_stored_image_signatures(self):
         for head in (b"\xff\xd8\xff\xe0", b"\x89PNG\r\n\x1a\n", b"GIF89a", b"BM\x36\x00"):
             self.assertTrue(h._looks_stored(head + b"rest"), head)

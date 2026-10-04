@@ -47,6 +47,12 @@ MAX_DOC_BYTES = 256 * 1024 * 1024
 INFLATE_CHUNK = 1024 * 1024  # inflate in steps so work is charged even if zlib then fails
 
 
+def _inflate_bound(n_in: int) -> int:
+    """Most output raw deflate can produce from n_in input bytes: at most 1032x expansion,
+    plus what zlib may still hold from earlier input (a 32 KiB window and one 258-byte match)."""
+    return n_in * 1032 + 32 * 1024 + 258
+
+
 def _looks_stored(raw: bytes) -> bool:
     """BinData image saved without compression (JPEG, PNG, GIF, BMP)."""
     return raw.startswith((b"\xff\xd8\xff", b"\x89PNG", b"GIF8", b"BM"))
@@ -86,7 +92,9 @@ def _inflate(raw: bytes, what: str, budget: _Budget) -> bytes:
         try:
             chunk = d.decompress(data, want)
         except zlib.error:
-            budget.spend(want)  # zlib may have produced up to `want` bytes before failing
+            # zlib may have produced output before failing; charge the most it could have,
+            # which for a few stored bytes is far less than a whole chunk.
+            budget.spend(min(want, _inflate_bound(len(data))))
             raise
         budget.spend(len(chunk))
         out += chunk

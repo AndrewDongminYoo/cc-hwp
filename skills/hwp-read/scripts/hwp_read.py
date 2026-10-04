@@ -67,8 +67,9 @@ def _too_large(what: str, limit: int) -> Unsupported:
 def _inflate(raw: bytes, what: str, budget: _Budget) -> bytes:
     limit = budget.limit()
     d = zlib.decompressobj(-15)
-    out = d.decompress(raw, limit)
-    if d.unconsumed_tail:
+    # limit + 1, never 0: zlib treats max_length=0 as "no limit".
+    out = d.decompress(raw, limit + 1)
+    if len(out) > limit or d.unconsumed_tail:
         raise _too_large(what, limit)
     if not d.eof:
         raise ValueError(f"{what}: 압축 스트림이 중간에 끊겼습니다 (손상된 문서).")

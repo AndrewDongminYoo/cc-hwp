@@ -265,6 +265,15 @@ class Fixtures(unittest.TestCase):
         with self.assertRaises(h.Unsupported):
             h._inflate(raw, "BodyText/Section1", budget)
 
+    def test_exhausted_budget_still_limits(self):
+        c = zlib.compressobj(wbits=-15)
+        raw = c.compress(b"x" * 100) + c.flush()
+        budget = h._Budget()
+        budget.left = 100  # the first stream spends it exactly; zlib reads max_length=0 as "no limit"
+        h._inflate(raw, "BodyText/Section0", budget)
+        with self.assertRaises(h.Unsupported):
+            h._inflate(raw, "BodyText/Section1", budget)
+
     def test_record_overrunning_section_is_a_parse_error(self):
         header = struct.pack("<I", h.TAG_PARA_TEXT | (100 << 20))  # declares 100 bytes
         with self.assertRaises(ValueError):

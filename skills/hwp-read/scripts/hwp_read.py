@@ -34,7 +34,7 @@ import zlib
 import xml.etree.ElementTree as ET
 import xml.parsers.expat
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 
 class Unsupported(Exception):
@@ -166,6 +166,9 @@ class Cell:
     rowspan: int
     colspan: int
     blocks: List["Block"]
+    # Line width in mm per side (top, left, bottom, right), None for no line;
+    # None as a whole when the document's border definition could not be resolved.
+    borders: Optional[Tuple[Optional[float], ...]] = None
 
 
 @dataclass
@@ -294,10 +297,13 @@ class CFB:
 
 # ───────────────────────────── HWP 5.0 (binary) ─────────────────────────────
 
+TAG_BORDER_FILL = 0x14  # DocInfo
 TAG_PARA_HEADER, TAG_PARA_TEXT, TAG_CTRL_HEADER, TAG_LIST_HEADER = 0x42, 0x43, 0x47, 0x48
 TAG_TABLE, TAG_SHAPE_PICTURE, TAG_EQEDIT = 0x4D, 0x55, 0x58
 EXTENDED_CTRL = {1, 2, 3, 11, 12, 14, 15, 16, 17, 18, 21, 22, 23}
 INLINE_CTRL = {4, 5, 6, 7, 8, 9, 19, 20}
+# BORDER_FILL line widths are an index into this table (mm); HWPX writes the same values as text.
+HWP5_LINE_MM = (0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0)
 
 
 @dataclass
@@ -363,6 +369,7 @@ class Hwp5Reader:
         self.flags = struct.unpack_from("<I", hdr, 36)[0]
         self.version = f"{(ver >> 24) & 0xFF}.{(ver >> 16) & 0xFF}.{(ver >> 8) & 0xFF}.{ver & 0xFF}"
         self.compressed = bool(self.flags & 0x01)
+        self.fills: list = []  # BORDER_FILL entries, read with the body
         self.doc = Doc("hwp5", budget=self.budget)
         self.doc.meta.update(version=self.version, compressed=self.compressed,
                              password=bool(self.flags & 0x02), distribution=bool(self.flags & 0x04))
@@ -379,6 +386,7 @@ class Hwp5Reader:
     def read(self) -> Doc:
         if self.cfb.exists("PrvText"):
             self.doc.preview_text = self.cfb.read("PrvText").decode("utf-16-le", "replace")
+        self.fills = self._border_fills()
         n = 0
         while self.cfb.exists(f"BodyText/Section{n}"):
             roots = _tree(_records(self._stream(f"BodyText/Section{n}")))
@@ -389,6 +397,28 @@ class Hwp5Reader:
         self.doc.meta["sections"] = n
         self.doc.images = [p.split("/", 1)[1] for p in self.cfb.list("BinData/")]
         return self.doc
+
+    def _border_fills(self) -> list:
+        """DocInfo BORDER_FILL records in ID order (ID n is entry n-1) as cell borders.
+        Borders only affect DOCX output, so an unreadable DocInfo leaves the list empty
+        and every cell falls back to the table default; the budget still applies."""
+        if not self.cfb.exists("DocInfo"):
+            return []
+        try:
+            recs = _records(self._stream("DocInfo"))
+        except (ValueError, zlib.error, struct.error):
+            return []
+        fills = []
+        for r in recs:
+            if r.tag != TAG_BORDER_FILL:
+                continue
+            if len(r.data) < 26:  # attribute UINT16, then left, right, top, bottom: type, width, colour
+                fills.append(None)
+                continue
+            left, right, top, bottom = (r.data[2 + 6 * k:4 + 6 * k] for k in range(4))
+            fills.append(tuple(None if t == 0 else HWP5_LINE_MM[min(w, len(HWP5_LINE_MM) - 1)]
+                               for t, w in (top, left, bottom, right)))
+        return fills
 
     def _paras(self, siblings: List[Rec]) -> List[Block]:
         out: List[Block] = []
@@ -487,7 +517,9 @@ class Hwp5Reader:
                     cur.blocks = self._paras(paras)
                     cells.append(cur)
                 col, row, cs, rs = struct.unpack_from("<HHHH", ch.data, 8) if len(ch.data) >= 16 else (0, 0, 1, 1)
-                cur, paras = Cell(row, col, max(rs, 1), max(cs, 1), []), []
+                bf = struct.unpack_from("<H", ch.data, 32)[0] if len(ch.data) >= 34 else 0
+                borders = self.fills[bf - 1] if 1 <= bf <= len(self.fills) else None
+                cur, paras = Cell(row, col, max(rs, 1), max(cs, 1), [], borders), []
             elif ch.tag == TAG_PARA_HEADER and cur is not None:
                 paras.append(ch)
         if cur is not None:
@@ -541,6 +573,15 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _width_mm(text: str) -> float:
+    """A width such as "0.12 mm" in mm, capped at Hancom's widest line so later unit
+    conversion cannot overflow; nan, inf and non-positive widths are invalid."""
+    mm = float(text.split()[0])
+    if not 0 < mm < float("inf"):
+        raise ValueError(f"line width {text!r}")
+    return min(mm, HWP5_LINE_MM[-1])
+
+
 def _outer_sublists(el) -> list:
     """hp:subList elements under el that are not nested inside another subList;
     nested ones (table cells, inner drawings) are reached when the outer list is parsed."""
@@ -566,6 +607,7 @@ class HwpxReader:
         manifest = _zip_read(self.z, "META-INF/manifest.xml", self.budget).decode(errors="replace") if "META-INF/manifest.xml" in names else ""
         if "encryption-data" in manifest:
             raise Unsupported("암호화된 HWPX 문서입니다.")
+        self.fills: dict = {}  # hh:borderFill by id, read with the body
         self.doc = Doc("hwpx", budget=self.budget)
         self.doc.meta["mimetype"] = mime
 
@@ -603,6 +645,7 @@ class HwpxReader:
         for m in (hpf.iter() if hpf is not None else ()):
             if _local(m.tag) == "title" and (m.text or "").strip():
                 self.doc.meta["title"] = m.text.strip()
+        self.fills = self._border_fills()
         secs = self._sections(hpf)
         if not secs:
             raise Unsupported("HWPX 패키지에 본문 섹션(Contents/sectionN.xml)이 없습니다.")
@@ -612,6 +655,30 @@ class HwpxReader:
         self.doc.meta["sections"] = len(secs)
         self.doc.images = sorted(n.split("/", 1)[1] for n in names if n.startswith("BinData/"))
         return self.doc
+
+    def _border_fills(self) -> dict:
+        """hh:borderFill definitions from header.xml by id, as cell borders.
+        Missing or unreadable definitions leave cells on the table default."""
+        if "Contents/header.xml" not in self.z.namelist():
+            return {}
+        try:
+            head = _xml(_zip_read(self.z, "Contents/header.xml", self.budget))
+        except Unsupported:
+            raise
+        except Exception:
+            return {}
+        fills = {}
+        for bf in head.iter():
+            if _local(bf.tag) != "borderFill":
+                continue
+            side = {_local(s.tag): s for s in bf}
+            try:
+                fills[bf.get("id")] = tuple(
+                    None if side[k].get("type", "NONE") == "NONE" else _width_mm(side[k].get("width", "0.1 mm"))
+                    for k in ("topBorder", "leftBorder", "bottomBorder", "rightBorder"))
+            except (KeyError, ValueError, IndexError):
+                continue  # incomplete definition: cells that use it take the table default
+        return fills
 
     def _paras(self, container) -> List[Block]:
         out: List[Block] = []
@@ -708,6 +775,7 @@ class HwpxReader:
                     max(int(span.get("rowSpan", 1)), 1) if span is not None else 1,
                     max(int(span.get("colSpan", 1)), 1) if span is not None else 1,
                     self._paras(sub) if sub is not None else [],
+                    self.fills.get(tc.get("borderFillIDRef")),
                 ))
         return Table(rows, cols, cells)
 
@@ -827,7 +895,8 @@ def to_markdown(doc: Doc) -> str:
 
 # ───────────────────────────── DOCX rendering ─────────────────────────────
 # Structure-preserving, not layout-faithful: paragraphs and every table, with its
-# merged cells, carry over from the IR; fonts, sizes, page layout and pictures do not.
+# merged cells and per-cell border lines, carry over from the IR; fonts, sizes, line
+# styles and colours, page layout and pictures do not.
 
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
@@ -855,9 +924,21 @@ def _docx_blocks(blocks: List[Block], grid: _GridBudget) -> List[str]:
             for b in blocks]
 
 
-def _docx_cell(span: int, vmerge: Optional[str], content: List[str]) -> str:
+def _docx_border(side: str, mm: Optional[float]) -> str:
+    if mm is None:
+        return f'<w:{side} w:val="nil"/>'
+    sz = min(max(round(mm / 25.4 * 72 * 8), 2), 96)  # eighths of a point, Word's allowed range
+    return f'<w:{side} w:val="single" w:sz="{sz}" w:space="0" w:color="000000"/>'
+
+
+def _docx_cell(span: int, vmerge: Optional[str], content: List[str],
+               borders: Optional[Tuple[Optional[float], ...]] = None) -> str:
+    # Children of w:tcPr and w:tcBorders must follow the schema order, or Word rejects the file.
     props = (f'<w:gridSpan w:val="{span}"/>' if span > 1 else "") + \
             ('<w:vMerge w:val="restart"/>' if vmerge == "restart" else "<w:vMerge/>" if vmerge else "")
+    if borders is not None:  # all four sides, so nothing falls through to the table's inside lines
+        props += "<w:tcBorders>" + "".join(_docx_border(s, mm) for s, mm in
+                                           zip(("top", "left", "bottom", "right"), borders)) + "</w:tcBorders>"
     body = "".join(content)
     if not content or content[-1].startswith("<w:tbl"):
         body += "<w:p/>"  # Word requires every cell to end with a paragraph
@@ -890,10 +971,10 @@ def _docx_table(t: Table, grid: _GridBudget) -> str:
                 col += 1
             elif c.row == r:
                 tcs.append(_docx_cell(c.colspan, "restart" if c.rowspan > 1 else None,
-                                      _docx_blocks(c.blocks, grid)))
+                                      _docx_blocks(c.blocks, grid), c.borders))
                 col += c.colspan
             else:  # continuation of a vertical merge started above
-                tcs.append(_docx_cell(c.colspan, "continue", []))
+                tcs.append(_docx_cell(c.colspan, "continue", [], c.borders))
                 col += c.colspan
         rows.append("<w:tr>" + "".join(tcs) + "</w:tr>")
     grid = f'<w:gridCol w:w="{max(_TEXT_WIDTH // ncols, 1)}"/>' * ncols
@@ -1176,7 +1257,7 @@ def cmd_convert(a) -> int:
     st = stats(doc, to_markdown(doc))
     print(json.dumps({"format": "docx", "output": out, "tables": st["tables"], "merged_tables": st["merged_tables"],
                       "preview_coverage": st["preview_coverage"], "warnings": st["warnings"],
-                      "note": "구조(문단·표·병합 셀)만 옮김. 글꼴·쪽 배치·그림은 포함되지 않음"},
+                      "note": "구조(문단·표·병합 셀)와 셀 테두리만 옮김. 글꼴·쪽 배치·그림은 포함되지 않음"},
                      ensure_ascii=False))
     return _exit_code(st)
 

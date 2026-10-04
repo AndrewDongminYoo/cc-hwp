@@ -59,7 +59,8 @@ so it works in any sandbox. All paths below are relative to this SKILL.md's dire
 
 - **Word (.docx):** `python3 scripts/hwp_read.py convert "<file>" --to docx -o out.docx`.
   Built from the same parse as `extract`, so every table, including one-row layout boxes, stays a Word table with its merged cells.
-  Fonts, sizes, page layout and pictures are not carried over; tell the user the result is an editable structural copy, not a visual replica.
+  Each cell keeps the document's own border lines (which sides are drawn, and their width), so borderless form rows stay borderless; a cell whose border definition cannot be read gets a thin line on every side.
+  Fonts, sizes, line styles and colours, page layout and pictures are not carried over; tell the user the result is an editable structural copy, not a visual replica.
   Works without `rhwp`. Don't write your own Markdown-to-DOCX converter: Markdown flattens layout boxes, so they come back as plain paragraphs.
 - **PDF:** use `render` above. Only the `rhwp` path gives a layout-faithful PDF; without it, say that a full PDF needs `rhwp` or Hancom/HOP's own export.
 

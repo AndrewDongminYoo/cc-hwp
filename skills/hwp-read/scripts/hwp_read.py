@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import collections
 import html
+import io
 import json
 import os
 import re
@@ -538,7 +539,6 @@ def _outer_sublists(el) -> list:
 
 class HwpxReader:
     def __init__(self, data: bytes, path: str):
-        import io
         self.z = zipfile.ZipFile(io.BytesIO(data))
         self.budget = _Budget()
         names = set(self.z.namelist())
@@ -802,6 +802,103 @@ def to_markdown(doc: Doc) -> str:
     return re.sub(r"\n{3,}", "\n\n", md).strip() + "\n"
 
 
+# ───────────────────────────── DOCX rendering ─────────────────────────────
+# Structure-preserving, not layout-faithful: paragraphs and every table, with its
+# merged cells, carry over from the IR; fonts, sizes, page layout and pictures do not.
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+_TBL_BORDERS = "".join(f'<w:{s} w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+                       for s in ("top", "left", "bottom", "right", "insideH", "insideV"))
+_TEXT_WIDTH = 9638  # twips between A4 margins of 1134 twips (2 cm)
+
+
+def _docx_para(text: str, indent: bool = False) -> str:
+    runs = []
+    for i, line in enumerate(text.split("\n")):
+        if i:
+            runs.append("<w:br/>")
+        for j, part in enumerate(line.split("\t")):
+            if j:
+                runs.append("<w:tab/>")
+            if part:
+                runs.append(f'<w:t xml:space="preserve">{html.escape(_XML_ILLEGAL.sub("", part), quote=False)}</w:t>')
+    ppr = '<w:pPr><w:ind w:left="567"/></w:pPr>' if indent else ""  # text boxes, like "> " in Markdown
+    return f"<w:p>{ppr}<w:r>{''.join(runs)}</w:r></w:p>" if runs else f"<w:p>{ppr}</w:p>"
+
+
+def _docx_blocks(blocks: List[Block]) -> List[str]:
+    return [_docx_table(b) if isinstance(b, Table) else _docx_para(b.text, b.kind == "textbox")
+            for b in blocks]
+
+
+def _docx_cell(span: int, vmerge: Optional[str], content: List[str]) -> str:
+    props = (f'<w:gridSpan w:val="{span}"/>' if span > 1 else "") + \
+            ('<w:vMerge w:val="restart"/>' if vmerge == "restart" else "<w:vMerge/>" if vmerge else "")
+    body = "".join(content)
+    if not content or content[-1].startswith("<w:tbl"):
+        body += "<w:p/>"  # Word requires every cell to end with a paragraph
+    return f"<w:tc><w:tcPr>{props}</w:tcPr>{body}</w:tc>"
+
+
+def _docx_table(t: Table) -> str:
+    if not t.cells:
+        return f"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol/></w:tblGrid><w:tr>{_docx_cell(1, None, [])}</w:tr></w:tbl>"
+    nrows = max(c.row + c.rowspan for c in t.cells)
+    ncols = max(c.col + c.colspan for c in t.cells)
+    starts = {(c.row, c.col): c for c in t.cells}
+    below = {(r, c.col): c for c in t.cells for r in range(c.row + 1, c.row + c.rowspan)}
+    rows = []
+    for r in range(nrows):
+        tcs, col = [], 0
+        while col < ncols:
+            c = starts.get((r, col))
+            if c is not None:
+                tcs.append(_docx_cell(c.colspan, "restart" if c.rowspan > 1 else None, _docx_blocks(c.blocks)))
+                col += c.colspan
+            elif (r, col) in below:  # continuation of a vertical merge started above
+                tcs.append(_docx_cell(below[(r, col)].colspan, "continue", []))
+                col += below[(r, col)].colspan
+            else:  # a hole in a malformed grid
+                tcs.append(_docx_cell(1, None, []))
+                col += 1
+        rows.append("<w:tr>" + "".join(tcs) + "</w:tr>")
+    grid = f'<w:gridCol w:w="{max(_TEXT_WIDTH // ncols, 1)}"/>' * ncols
+    return (f'<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>{_TBL_BORDERS}</w:tblBorders>'
+            f"</w:tblPr><w:tblGrid>{grid}</w:tblGrid>{''.join(rows)}</w:tbl>")
+
+
+def to_docx(doc: Doc) -> bytes:
+    body = _docx_blocks(doc.blocks)
+    for i, note in enumerate(doc.notes, 1):  # notes as trailing paragraphs, matching the [^n] markers
+        body.append(_docx_para(f"[^{i}]:"))
+        body.extend(_docx_blocks(note))
+    sect = ('<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" '
+            'w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr>')
+    document = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<w:document xmlns:w="{_W_NS}"><w:body>{"".join(body)}{sect}</w:body></w:document>')
+    parts = {
+        "[Content_Types].xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/word/document.xml" ContentType="application/'
+            'vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+        "_rels/.rels": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+        "word/document.xml": document,
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, xml_text in parts.items():
+            z.writestr(name, xml_text.encode("utf-8"))
+    return buf.getvalue()
+
+
 # ───────────────────────────── verification ─────────────────────────────
 
 def _squash(s: str) -> str:
@@ -994,6 +1091,19 @@ def cmd_render(a) -> int:
     return 0
 
 
+def cmd_convert(a) -> int:
+    doc = load(a.file)
+    out = a.output or os.path.splitext(os.path.basename(a.file))[0] + ".docx"
+    with open(out, "wb") as f:
+        f.write(to_docx(doc))
+    md = to_markdown(doc)
+    st = stats(doc, md)
+    print(json.dumps({"format": "docx", "output": out, "tables": st["tables"], "merged_tables": st["merged_tables"],
+                      "note": "구조(문단·표·병합 셀)만 옮김. 글꼴·쪽 배치·그림은 포함되지 않음"},
+                     ensure_ascii=False))
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="hwp_read", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1003,6 +1113,8 @@ def main(argv=None) -> int:
     p.set_defaults(fn=cmd_extract)
     p = sub.add_parser("render"); p.add_argument("file"); p.add_argument("-o", "--output")
     p.add_argument("--page", type=int); p.set_defaults(fn=cmd_render)
+    p = sub.add_parser("convert"); p.add_argument("file"); p.add_argument("--to", choices=["docx"], required=True)
+    p.add_argument("-o", "--output"); p.set_defaults(fn=cmd_convert)
     a = ap.parse_args(argv)
     try:
         return a.fn(a)

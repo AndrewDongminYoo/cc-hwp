@@ -1,6 +1,7 @@
 """Regression tests: run with `python3 -m unittest discover tests` (stdlib only)."""
 import collections
 import html
+import io
 import os
 import re
 import shutil
@@ -11,6 +12,7 @@ import tempfile
 import unittest
 import zipfile
 import zlib
+import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(__file__)
 SCRIPT = os.path.join(HERE, "..", "skills", "hwp-read", "scripts", "hwp_read.py")
@@ -18,6 +20,7 @@ sys.path.insert(0, os.path.dirname(SCRIPT))
 import hwp_read as h  # noqa: E402
 
 FIX = os.path.join(HERE, "fixtures")
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
 def _read(path):
@@ -399,6 +402,63 @@ class Fixtures(unittest.TestCase):
     def test_multiline_note_stays_in_definition(self):
         doc = h.Doc("hwp5", blocks=[h.Para("body[^1]")], notes=[[h.Para("first\nsecond")]])
         self.assertIn("[^1]: first second", h.to_markdown(doc))
+
+    def _docx_xml(self, name):
+        doc = h.load(os.path.join(FIX, name))
+        z = zipfile.ZipFile(io.BytesIO(h.to_docx(doc)))
+        for part in z.namelist():
+            if part.endswith((".xml", ".rels")):
+                ET.fromstring(z.read(part))  # every part is well-formed
+        return doc, ET.fromstring(z.read("word/document.xml"))
+
+    def _ir_counts(self, blocks, acc=None):
+        acc = acc or {"tables": 0, "colspan": 0, "rowspan": 0}
+        for b in blocks:
+            if isinstance(b, h.Table):
+                acc["tables"] += 1
+                for c in b.cells:
+                    acc["colspan"] += c.colspan > 1
+                    acc["rowspan"] += c.rowspan > 1
+                    self._ir_counts(c.blocks, acc)
+        return acc
+
+    def test_docx_keeps_every_table_and_merge(self):
+        for name in ("e-phi-design.hwp", "sk-openinno-form.hwpx"):
+            doc, root = self._docx_xml(name)
+            starts = []  # cells that begin a merge region (a vMerge continuation repeats its gridSpan)
+            for tc in root.iter(f"{W}tc"):
+                vm = tc.find(f"{W}tcPr/{W}vMerge")
+                if vm is None or vm.get(f"{W}val") == "restart":
+                    starts.append(tc)
+            got = {
+                "tables": len(root.findall(f".//{W}tbl")),
+                "colspan": sum(1 for tc in starts
+                               if int(tc.find(f"{W}tcPr/{W}gridSpan").get(f"{W}val", "1")
+                                      if tc.find(f"{W}tcPr/{W}gridSpan") is not None else 1) > 1),
+                "rowspan": sum(1 for v in root.iter(f"{W}vMerge") if v.get(f"{W}val") == "restart"),
+            }
+            self.assertEqual(got, self._ir_counts(doc.blocks), name)
+
+    def test_docx_keeps_every_character(self):
+        for name in ("e-phi-design.hwp", "sk-openinno-form.hwpx"):
+            doc, root = self._docx_xml(name)
+            out = _chars("".join(t.text or "" for t in root.iter(f"{W}t")))
+            missing = _md_chars(h.to_markdown(doc)) - out
+            self.assertFalse(missing, f"{name}: {dict(missing.most_common(10))}")
+
+    def test_docx_cells_end_with_a_paragraph(self):
+        _, root = self._docx_xml("e-phi-design.hwp")
+        for tc in root.iter(f"{W}tc"):
+            self.assertEqual(tc[-1].tag, f"{W}p")  # Word rejects a cell whose last child is not a paragraph
+
+    def test_cli_convert_docx(self):
+        out = os.path.join(self.tmp, "form.docx")
+        r = subprocess.run([sys.executable, SCRIPT, "convert", os.path.join(FIX, "sk-openinno-form.hwpx"),
+                            "--to", "docx", "-o", out], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if shutil.which("textutil"):  # macOS: an independent DOCX reader
+            txt = subprocess.run(["textutil", "-convert", "txt", "-stdout", out], capture_output=True, text=True)
+            self.assertIn("참가신청서", txt.stdout)
 
     def test_cli_exit_codes(self):
         r = subprocess.run([sys.executable, SCRIPT, "extract", os.path.join(FIX, "e-phi-design.hwp")],

@@ -1,4 +1,5 @@
 """Regression tests: run with `python3 -m unittest discover tests` (stdlib only)."""
+
 import argparse
 import collections
 import contextlib
@@ -15,9 +16,9 @@ import tempfile
 import time
 import tracemalloc
 import unittest
+import xml.etree.ElementTree as ET
 import zipfile
 import zlib
-import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(__file__)
 SCRIPT = os.path.join(HERE, "..", "skills", "hwp-read", "scripts", "hwp_read.py")
@@ -53,7 +54,8 @@ def _raw_hwp5_chars(path):
                 i = 0
                 while i < len(w):
                     if w[i] >= 32:
-                        out.append(chr(w[i])); i += 1
+                        out.append(chr(w[i]))
+                        i += 1
                     elif w[i] in h.EXTENDED_CTRL or w[i] in h.INLINE_CTRL:
                         i += 8
                     else:
@@ -67,7 +69,9 @@ def _raw_hwpx_chars(path):
     txt = []
     for n in z.namelist():
         if re.match(r"Contents/section\d+\.xml$", n):
-            for m in re.finditer(r"<hp:t(?:\s[^>]*)?>(.*?)</hp:t>", z.read(n).decode(), re.S):
+            for m in re.finditer(
+                r"<hp:t(?:\s[^>]*)?>(.*?)</hp:t>", z.read(n).decode(), re.S
+            ):
                 txt.append(html.unescape(re.sub(r"<[^>]+>", "", m.group(1))))
     return _chars("".join(txt))
 
@@ -126,7 +130,9 @@ class Fixtures(unittest.TestCase):
                 zout.writestr(info, zin.read(info.filename))
             zout.writestr("BinData/../../escaped.bin", b"payload")
             absolute = os.path.join(self.tmp, "absolute.bin")
-            zout.writestr("BinData/" + absolute, b"payload")  # BinData//tmp/... after the prefix
+            zout.writestr(
+                "BinData/" + absolute, b"payload"
+            )  # BinData//tmp/... after the prefix
         outdir = os.path.join(self.tmp, "a", "b", "images")
         written = h.save_images(p, h.load(p), outdir)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "a", "escaped.bin")))
@@ -136,7 +142,13 @@ class Fixtures(unittest.TestCase):
             self.assertTrue(os.path.realpath(w).startswith(root + os.sep), w)
 
     def test_utf16_surrogate_pairs_combined(self):
-        units = [0xAC00, 0xD83D, 0xDE00, 0x0041, 0xD800]  # 가, 😀 as a pair, A, lone high surrogate
+        units = [
+            0xAC00,
+            0xD83D,
+            0xDE00,
+            0x0041,
+            0xD800,
+        ]  # 가, 😀 as a pair, A, lone high surrogate
         out, i = [], 0
         while i < len(units):
             s, n = h._utf16_char(units, i)
@@ -154,15 +166,24 @@ class Fixtures(unittest.TestCase):
         p = os.path.join(self.tmp, "cycle.hwp")
         with open(p, "wb") as f:
             f.write(data)
-        r = subprocess.run([sys.executable, SCRIPT, "info", p], capture_output=True, text=True, timeout=20)
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "info", p],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
         self.assertIn(r.returncode, (0, 1, 3), r.stderr)
 
     def test_cfb_difat_cycle_is_bounded(self):
         data = bytearray(_read(os.path.join(FIX, "e-phi-design.hwp")))
         ss = 1 << struct.unpack_from("<H", data, 0x1E)[0]
         k = len(data) // ss - 2  # last sector index
-        struct.pack_into("<II", data, 0x44, k, 10000)  # first DIFAT sector, declared DIFAT count
-        struct.pack_into("<I", data, (k + 1) * ss + ss - 4, k)  # its next-DIFAT link points to itself
+        struct.pack_into(
+            "<II", data, 0x44, k, 10000
+        )  # first DIFAT sector, declared DIFAT count
+        struct.pack_into(
+            "<I", data, (k + 1) * ss + ss - 4, k
+        )  # its next-DIFAT link points to itself
         calls = []
         orig = h.CFB._sec
 
@@ -180,9 +201,9 @@ class Fixtures(unittest.TestCase):
             '<hp:p xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"><hp:run><hp:rect><hp:drawText>'
             '<hp:subList><hp:p><hp:run><hp:tbl rowCnt="1" colCnt="1"><hp:tr><hp:tc>'
             '<hp:cellAddr colAddr="0" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/>'
-            '<hp:subList><hp:p><hp:run><hp:t>CELLTEXT</hp:t></hp:run></hp:p></hp:subList>'
-            '</hp:tc></hp:tr></hp:tbl></hp:run></hp:p></hp:subList>'
-            '</hp:drawText></hp:rect></hp:run></hp:p>'
+            "<hp:subList><hp:p><hp:run><hp:t>CELLTEXT</hp:t></hp:run></hp:p></hp:subList>"
+            "</hp:tc></hp:tr></hp:tbl></hp:run></hp:p></hp:subList>"
+            "</hp:drawText></hp:rect></hp:run></hp:p>"
         )
         r = h.HwpxReader.__new__(h.HwpxReader)
         r.doc, r.fills = h.Doc("hwpx"), {}
@@ -192,6 +213,7 @@ class Fixtures(unittest.TestCase):
     def test_hwp5_textbox_with_table_not_duplicated(self):
         def rec(tag, level, children=()):
             return h.Rec(tag, level, b"", list(children))
+
         cell_para = rec(h.TAG_PARA_HEADER, 4)
         table = rec(h.TAG_CTRL_HEADER, 3, [rec(h.TAG_LIST_HEADER, 4), cell_para])
         box_para = rec(h.TAG_PARA_HEADER, 2, [table])
@@ -200,17 +222,34 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(lists, [[box_para]])
 
     def test_note_with_table_keeps_cells(self):
-        t = h.Table(1, 2, [h.Cell(0, 0, 1, 1, [h.Para("NOTECELL")]), h.Cell(0, 1, 1, 1, [h.Para("x")])])
+        t = h.Table(
+            1,
+            2,
+            [
+                h.Cell(0, 0, 1, 1, [h.Para("NOTECELL")]),
+                h.Cell(0, 1, 1, 1, [h.Para("x")]),
+            ],
+        )
         doc = h.Doc("hwp5", blocks=[h.Para("body[^1]")], notes=[[h.Para("see"), t]])
         self.assertIn("NOTECELL", h.to_markdown(doc))
 
     def test_html_table_keeps_rows_covered_by_rowspan(self):
-        t = h.Table(3, 2, [h.Cell(0, 0, 2, 1, [h.Para("A")]), h.Cell(0, 1, 2, 1, [h.Para("B")]),
-                           h.Cell(2, 0, 1, 1, [h.Para("C")]), h.Cell(2, 1, 1, 1, [h.Para("D")])])
+        t = h.Table(
+            3,
+            2,
+            [
+                h.Cell(0, 0, 2, 1, [h.Para("A")]),
+                h.Cell(0, 1, 2, 1, [h.Para("B")]),
+                h.Cell(2, 0, 1, 1, [h.Para("C")]),
+                h.Cell(2, 1, 1, 1, [h.Para("D")]),
+            ],
+        )
         self.assertEqual(h._table_html(t, h._GridBudget()).count("<tr>"), 3)
 
     def test_preview_coverage_checks_last_line_of_untruncated_preview(self):
-        self.assertLess(h.preview_coverage("present text\nmissing text\n", "present text"), 1.0)
+        self.assertLess(
+            h.preview_coverage("present text\nmissing text\n", "present text"), 1.0
+        )
         cut = ("x" * 40 + "\n") * 24 + "partial chunk cut he"  # at the ~1K PrvText cap
         self.assertEqual(h.preview_coverage(cut, ("x" * 40 + "\n") * 24), 1.0)
 
@@ -236,7 +275,10 @@ class Fixtures(unittest.TestCase):
             for info in zin.infolist():
                 data = zin.read(info.filename)
                 if info.filename == "Contents/section0.xml":
-                    data = b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]>' + data.split(b"?>", 1)[1]
+                    data = (
+                        b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]>'
+                        + data.split(b"?>", 1)[1]
+                    )
                 zout.writestr(info, data)
         with self.assertRaises(h.Unsupported):
             h.load(p)
@@ -254,10 +296,17 @@ class Fixtures(unittest.TestCase):
 
     def test_document_budget_spans_hwpx_parts(self):
         p = os.path.join(FIX, "sk-openinno-form.hwpx")
-        read_by_load = {"mimetype", "META-INF/manifest.xml", "Contents/content.hpf",
-                        "Preview/PrvText.txt", "Contents/section0.xml"}
+        read_by_load = {
+            "mimetype",
+            "META-INF/manifest.xml",
+            "Contents/content.hpf",
+            "Preview/PrvText.txt",
+            "Contents/section0.xml",
+        }
         with zipfile.ZipFile(p) as z:
-            largest = max(i.file_size for i in z.infolist() if i.filename in read_by_load)
+            largest = max(
+                i.file_size for i in z.infolist() if i.filename in read_by_load
+            )
         orig = h.MAX_DOC_BYTES
         h.MAX_DOC_BYTES = largest + 1  # every single part fits; their sum does not
         self.addCleanup(setattr, h, "MAX_DOC_BYTES", orig)
@@ -296,7 +345,9 @@ class Fixtures(unittest.TestCase):
         h.INFLATE_CHUNK = 64
         self.addCleanup(setattr, h, "INFLATE_CHUNK", orig)
         c = zlib.compressobj(wbits=-15)
-        raw = c.compress(b"x" * 1000) + c.flush(zlib.Z_SYNC_FLUSH) + b"\x06"  # valid prefix, then a reserved block type
+        raw = (
+            c.compress(b"x" * 1000) + c.flush(zlib.Z_SYNC_FLUSH) + b"\x06"
+        )  # valid prefix, then a reserved block type
         budget = h._Budget()
         before = budget.left
         with self.assertRaises(zlib.error):
@@ -305,7 +356,9 @@ class Fixtures(unittest.TestCase):
 
     def test_sub_chunk_zlib_failure_is_charged(self):
         c = zlib.compressobj(wbits=-15)
-        raw = c.compress(b"x" * 100) + c.flush(zlib.Z_SYNC_FLUSH) + b"\x06"  # fails inside the first chunk
+        raw = (
+            c.compress(b"x" * 100) + c.flush(zlib.Z_SYNC_FLUSH) + b"\x06"
+        )  # fails inside the first chunk
         budget = h._Budget()
         before = budget.left
         with self.assertRaises(zlib.error):
@@ -320,17 +373,23 @@ class Fixtures(unittest.TestCase):
         budget = h._Budget()
         budget.left = 50
         with self.assertRaises(zlib.error):
-            h._inflate(bad, "BinData/BIN0001.bmp", budget)  # charges want = 51, leaving -1
+            h._inflate(
+                bad, "BinData/BIN0001.bmp", budget
+            )  # charges want = 51, leaving -1
         self.assertEqual(budget.left, -1)
         with self.assertRaises(h.Unsupported):
             h._inflate(good, "BinData/BIN0002.bmp", budget)
-        self.assertEqual(budget.left, -1)  # refused before inflating anything, not after
+        self.assertEqual(
+            budget.left, -1
+        )  # refused before inflating anything, not after
         z = zipfile.ZipFile(os.path.join(FIX, "sk-openinno-form.hwpx"))
         with self.assertRaises(h.Unsupported):
             h._zip_read(z, "mimetype", budget)
 
     def test_small_stored_entry_failure_charges_little(self):
-        stored = b"\x01\x00\x09\x00" + b"\x00" * 60  # WMF-like bytes, not a deflate stream
+        stored = (
+            b"\x01\x00\x09\x00" + b"\x00" * 60
+        )  # WMF-like bytes, not a deflate stream
         budget = h._Budget()
         before = budget.left
         with self.assertRaises(zlib.error):
@@ -340,7 +399,12 @@ class Fixtures(unittest.TestCase):
         self.assertLess(charged, h.INFLATE_CHUNK // 10)
 
     def test_stored_image_signatures(self):
-        for head in (b"\xff\xd8\xff\xe0", b"\x89PNG\r\n\x1a\n", b"GIF89a", b"BM\x36\x00"):
+        for head in (
+            b"\xff\xd8\xff\xe0",
+            b"\x89PNG\r\n\x1a\n",
+            b"GIF89a",
+            b"BM\x36\x00",
+        ):
             self.assertTrue(h._looks_stored(head + b"rest"), head)
         c = zlib.compressobj(wbits=-15)
         self.assertFalse(h._looks_stored(c.compress(b"x" * 100) + c.flush()))
@@ -393,7 +457,7 @@ class Fixtures(unittest.TestCase):
         name = "Section0".encode("utf-16-le")
         i = data.find(name)
         self.assertGreater(i, 0)
-        data[i:i + len(name)] = "SectionX".encode("utf-16-le")
+        data[i : i + len(name)] = "SectionX".encode("utf-16-le")
         p = os.path.join(self.tmp, "nobody.hwp")
         with open(p, "wb") as f:
             f.write(data)
@@ -401,11 +465,17 @@ class Fixtures(unittest.TestCase):
             h.load(p)
 
     def test_preview_coverage_counts_duplicate_lines(self):
-        self.assertLess(h.preview_coverage("repeated line\nrepeated line\nother line\n",
-                                           "repeated line other line"), 1.0)
+        self.assertLess(
+            h.preview_coverage(
+                "repeated line\nrepeated line\nother line\n", "repeated line other line"
+            ),
+            1.0,
+        )
 
     def test_multiline_note_stays_in_definition(self):
-        doc = h.Doc("hwp5", blocks=[h.Para("body[^1]")], notes=[[h.Para("first\nsecond")]])
+        doc = h.Doc(
+            "hwp5", blocks=[h.Para("body[^1]")], notes=[[h.Para("first\nsecond")]]
+        )
         self.assertIn("[^1]: first second", h.to_markdown(doc))
 
     def _docx_xml(self, name):
@@ -430,17 +500,28 @@ class Fixtures(unittest.TestCase):
     def test_docx_keeps_every_table_and_merge(self):
         for name in ("e-phi-design.hwp", "sk-openinno-form.hwpx"):
             doc, root = self._docx_xml(name)
-            starts = []  # cells that begin a merge region (a vMerge continuation repeats its gridSpan)
+            starts = (
+                []
+            )  # cells that begin a merge region (a vMerge continuation repeats its gridSpan)
             for tc in root.iter(f"{W}tc"):
                 vm = tc.find(f"{W}tcPr/{W}vMerge")
                 if vm is None or vm.get(f"{W}val") == "restart":
                     starts.append(tc)
             got = {
                 "tables": len(root.findall(f".//{W}tbl")),
-                "colspan": sum(1 for tc in starts
-                               if int(tc.find(f"{W}tcPr/{W}gridSpan").get(f"{W}val", "1")
-                                      if tc.find(f"{W}tcPr/{W}gridSpan") is not None else 1) > 1),
-                "rowspan": sum(1 for v in root.iter(f"{W}vMerge") if v.get(f"{W}val") == "restart"),
+                "colspan": sum(
+                    1
+                    for tc in starts
+                    if int(
+                        tc.find(f"{W}tcPr/{W}gridSpan").get(f"{W}val", "1")
+                        if tc.find(f"{W}tcPr/{W}gridSpan") is not None
+                        else 1
+                    )
+                    > 1
+                ),
+                "rowspan": sum(
+                    1 for v in root.iter(f"{W}vMerge") if v.get(f"{W}val") == "restart"
+                ),
             }
             self.assertEqual(got, self._ir_counts(doc.blocks), name)
 
@@ -454,7 +535,9 @@ class Fixtures(unittest.TestCase):
     def test_docx_cells_end_with_a_paragraph(self):
         _, root = self._docx_xml("e-phi-design.hwp")
         for tc in root.iter(f"{W}tc"):
-            self.assertEqual(tc[-1].tag, f"{W}p")  # Word rejects a cell whose last child is not a paragraph
+            self.assertEqual(
+                tc[-1].tag, f"{W}p"
+            )  # Word rejects a cell whose last child is not a paragraph
 
     def _ir_cells(self, blocks):
         """Cells in document order: a cell before the tables nested in it."""
@@ -471,26 +554,43 @@ class Fixtures(unittest.TestCase):
     def test_docx_cell_borders_per_side(self):
         # top thick, left none, bottom none, right thin: a swapped side cannot pass
         a = h.Cell(0, 0, 2, 1, [h.Para("A")], borders=(0.4, None, None, 0.1))
-        b = h.Cell(0, 1, 1, 1, [h.Para("B")])  # no border information: table default applies
+        b = h.Cell(
+            0, 1, 1, 1, [h.Para("B")]
+        )  # no border information: table default applies
         c = h.Cell(1, 1, 1, 1, [h.Para("C")], borders=(None, None, None, None))
-        z = zipfile.ZipFile(io.BytesIO(h.to_docx(h.Doc("hwp5", blocks=[h.Table(2, 2, [a, b, c])]))))
+        z = zipfile.ZipFile(
+            io.BytesIO(h.to_docx(h.Doc("hwp5", blocks=[h.Table(2, 2, [a, b, c])])))
+        )
         root = ET.fromstring(z.read("word/document.xml"))
         rows = [tr.findall(f"{W}tc") for tr in root.iter(f"{W}tr")]
 
         def sides(tc):
             tb = tc.find(f"{W}tcPr/{W}tcBorders")
-            return None if tb is None else [(_local(s.tag), s.get(f"{W}val"), s.get(f"{W}sz")) for s in tb]
+            return (
+                None
+                if tb is None
+                else [(_local(s.tag), s.get(f"{W}val"), s.get(f"{W}sz")) for s in tb]
+            )
 
         def _local(tag):
             return tag.rsplit("}", 1)[-1]
 
-        want_a = [("top", "single", "9"), ("left", "nil", None), ("bottom", "nil", None), ("right", "single", "2")]
+        want_a = [
+            ("top", "single", "9"),
+            ("left", "nil", None),
+            ("bottom", "nil", None),
+            ("right", "single", "2"),
+        ]
         self.assertEqual(sides(rows[0][0]), want_a)
-        self.assertEqual(sides(rows[1][0]), want_a)  # the vMerge continuation repeats its owner
+        self.assertEqual(
+            sides(rows[1][0]), want_a
+        )  # the vMerge continuation repeats its owner
         self.assertIsNone(sides(rows[0][1]))
         self.assertEqual([v for _, v, _ in sides(rows[1][1])], ["nil"] * 4)
         tcpr = rows[0][0].find(f"{W}tcPr")
-        self.assertEqual([_local(e.tag) for e in tcpr], ["vMerge", "tcBorders"])  # schema order
+        self.assertEqual(
+            [_local(e.tag) for e in tcpr], ["vMerge", "tcBorders"]
+        )  # schema order
 
     def test_hwpx_cell_borders_follow_header(self):
         path = os.path.join(FIX, "sk-openinno-form.hwpx")
@@ -500,10 +600,18 @@ class Fixtures(unittest.TestCase):
             if bf.tag.endswith("}borderFill"):
                 side = {s.tag.rsplit("}", 1)[-1]: s for s in bf}
                 fills[bf.get("id")] = tuple(
-                    None if side[k].get("type") == "NONE" else float(side[k].get("width").split()[0])
-                    for k in ("topBorder", "leftBorder", "bottomBorder", "rightBorder"))
-        want = [fills[tc.get("borderFillIDRef")]
-                for tc in ET.fromstring(z.read("Contents/section0.xml")).iter() if tc.tag.endswith("}tc")]
+                    (
+                        None
+                        if side[k].get("type") == "NONE"
+                        else float(side[k].get("width").split()[0])
+                    )
+                    for k in ("topBorder", "leftBorder", "bottomBorder", "rightBorder")
+                )
+        want = [
+            fills[tc.get("borderFillIDRef")]
+            for tc in ET.fromstring(z.read("Contents/section0.xml")).iter()
+            if tc.tag.endswith("}tc")
+        ]
         got = [c.borders for c in self._ir_cells(h.load(path).blocks)]
         self.assertEqual(got, want)
         self.assertTrue(any(self._asymmetric(s) for s in want))
@@ -511,12 +619,38 @@ class Fixtures(unittest.TestCase):
     def test_hwp5_cell_borders_follow_docinfo(self):
         path = os.path.join(FIX, "e-phi-design.hwp")
         r = h.Hwp5Reader(_read(path))
-        mm = (0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0)
+        mm = (
+            0.1,
+            0.12,
+            0.15,
+            0.2,
+            0.25,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
+            0.7,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            5.0,
+        )
         fills = []
         for rec in h._records(r._stream("DocInfo")):
-            if rec.tag == 0x14:  # BORDER_FILL: attribute UINT16, then left, right, top, bottom
-                lrtb = [struct.unpack_from("<BB", rec.data, 2 + 6 * k) for k in range(4)]
-                fills.append(tuple(None if t == 0 else mm[w] for t, w in (lrtb[2], lrtb[0], lrtb[3], lrtb[1])))
+            if (
+                rec.tag == 0x14
+            ):  # BORDER_FILL: attribute UINT16, then left, right, top, bottom
+                lrtb = [
+                    struct.unpack_from("<BB", rec.data, 2 + 6 * k) for k in range(4)
+                ]
+                fills.append(
+                    tuple(
+                        None if t == 0 else mm[w]
+                        for t, w in (lrtb[2], lrtb[0], lrtb[3], lrtb[1])
+                    )
+                )
         want = []
 
         def walk(nodes):
@@ -524,7 +658,9 @@ class Fixtures(unittest.TestCase):
                 if n.tag == h.TAG_CTRL_HEADER and h._ctrl_id(n.data) == "tbl ":
                     for ch in n.children:
                         if ch.tag == h.TAG_LIST_HEADER:
-                            want.append(fills[struct.unpack_from("<H", ch.data, 32)[0] - 1])
+                            want.append(
+                                fills[struct.unpack_from("<H", ch.data, 32)[0] - 1]
+                            )
                         else:
                             walk([ch])
                 else:
@@ -548,13 +684,23 @@ class Fixtures(unittest.TestCase):
 
     def test_non_finite_border_width_falls_back(self):
         src = os.path.join(FIX, "sk-openinno-form.hwpx")
-        for bad in (b"nan mm", b"inf mm", b"1e308 mm"):  # the last is finite but overflows in points
+        for bad in (
+            b"nan mm",
+            b"inf mm",
+            b"1e308 mm",
+        ):  # the last is finite but overflows in points
             p = os.path.join(self.tmp, "bad.hwpx")
             with zipfile.ZipFile(src) as zin, zipfile.ZipFile(p, "w") as zout:
                 for n in zin.namelist():
                     data = zin.read(n)
-                    if n == "Contents/header.xml":  # every drawn line, so cells in use are hit
-                        data = re.sub(rb'(type="SOLID" )width="[^"]*"', rb'\1width="' + bad + b'"', data)
+                    if (
+                        n == "Contents/header.xml"
+                    ):  # every drawn line, so cells in use are hit
+                        data = re.sub(
+                            rb'(type="SOLID" )width="[^"]*"',
+                            rb'\1width="' + bad + b'"',
+                            data,
+                        )
                     zout.writestr(n, data)
             doc = h.load(p)
             h.to_docx(doc)  # no ValueError/OverflowError from the width conversion
@@ -564,32 +710,59 @@ class Fixtures(unittest.TestCase):
 
     def test_docx_refuses_oversized_grids(self):
         big = h.MAX_GRID_CELLS + 1
-        for cell in (h.Cell(0, 0, 1, big, [h.Para("x")]), h.Cell(0, 0, big, 1, [h.Para("x")])):
+        for cell in (
+            h.Cell(0, 0, 1, big, [h.Para("x")]),
+            h.Cell(0, 0, big, 1, [h.Para("x")]),
+        ):
             doc = h.Doc("hwpx", blocks=[h.Table(1, 1, [cell])])
             with self.assertRaises(h.Unsupported):
                 h.to_docx(doc)
 
     def _convert(self, out):
-        with contextlib.redirect_stdout(io.StringIO()):  # keep the JSON report out of the test log
-            return h.cmd_convert(argparse.Namespace(file=os.path.join(FIX, "sk-openinno-form.hwpx"),
-                                                    output=out, to="docx"))
+        with contextlib.redirect_stdout(
+            io.StringIO()
+        ):  # keep the JSON report out of the test log
+            return h.cmd_convert(
+                argparse.Namespace(
+                    file=os.path.join(FIX, "sk-openinno-form.hwpx"),
+                    output=out,
+                    to="docx",
+                )
+            )
 
     def test_markdown_refuses_oversized_simple_grid(self):
-        far = h.MAX_GRID_CELLS  # two rows, so a simple table, not a flattened layout box
-        t = h.Table(2, far + 1, [h.Cell(0, 0, 1, 1, [h.Para("a")]), h.Cell(1, far, 1, 1, [h.Para("b")])])
+        far = (
+            h.MAX_GRID_CELLS
+        )  # two rows, so a simple table, not a flattened layout box
+        t = h.Table(
+            2,
+            far + 1,
+            [h.Cell(0, 0, 1, 1, [h.Para("a")]), h.Cell(1, far, 1, 1, [h.Para("b")])],
+        )
         with self.assertRaises(h.Unsupported):
             h.to_markdown(h.Doc("hwpx", blocks=[t]))
 
     def test_markdown_refuses_oversized_html_rows(self):
-        far = h.MAX_GRID_CELLS + 1  # merged and two starting rows: HTML, one <tr> per grid row
-        t = h.Table(far, 2, [h.Cell(0, 0, far, 1, [h.Para("a")]), h.Cell(0, 1, 1, 1, [h.Para("b")]),
-                             h.Cell(1, 1, 1, 1, [h.Para("c")])])
+        far = (
+            h.MAX_GRID_CELLS + 1
+        )  # merged and two starting rows: HTML, one <tr> per grid row
+        t = h.Table(
+            far,
+            2,
+            [
+                h.Cell(0, 0, far, 1, [h.Para("a")]),
+                h.Cell(0, 1, 1, 1, [h.Para("b")]),
+                h.Cell(1, 1, 1, 1, [h.Para("c")]),
+            ],
+        )
         with self.assertRaises(h.Unsupported):
             h.to_markdown(h.Doc("hwpx", blocks=[t]))
 
     def test_docx_streams_instead_of_holding_copies(self):
         text = "&" * 5000  # escapes to 25,000 characters per paragraph
-        doc = h.Doc("hwpx", blocks=[h.Para(text) for _ in range(2000)])  # ~50 MB of escaped XML
+        doc = h.Doc(
+            "hwpx", blocks=[h.Para(text) for _ in range(2000)]
+        )  # ~50 MB of escaped XML
         tracemalloc.start()
         try:
             h.to_docx(doc)
@@ -599,18 +772,33 @@ class Fixtures(unittest.TestCase):
         self.assertLess(peak, 20 * 1024 * 1024, f"peak {peak} bytes")
 
     def test_convert_refuses_to_overwrite_its_source(self):
-        src = os.path.join(self.tmp, "report.docx")  # an HWPX named like the default output
+        src = os.path.join(
+            self.tmp, "report.docx"
+        )  # an HWPX named like the default output
         shutil.copy(os.path.join(FIX, "sk-openinno-form.hwpx"), src)
         before = _read(src)
-        r = subprocess.run([sys.executable, os.path.abspath(SCRIPT), "convert", "report.docx", "--to", "docx"],
-                           capture_output=True, text=True, cwd=self.tmp)
+        r = subprocess.run(
+            [
+                sys.executable,
+                os.path.abspath(SCRIPT),
+                "convert",
+                "report.docx",
+                "--to",
+                "docx",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=self.tmp,
+        )
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertEqual(_read(src), before)
 
     def test_hwpx_negative_cell_address_is_a_parse_error(self):
-        xml = ('<hp:tbl xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" rowCnt="1" colCnt="1">'
-               '<hp:tr><hp:tc><hp:cellAddr colAddr="-1" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/>'
-               '<hp:subList><hp:p><hp:run><hp:t>x</hp:t></hp:run></hp:p></hp:subList></hp:tc></hp:tr></hp:tbl>')
+        xml = (
+            '<hp:tbl xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" rowCnt="1" colCnt="1">'
+            '<hp:tr><hp:tc><hp:cellAddr colAddr="-1" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/>'
+            "<hp:subList><hp:p><hp:run><hp:t>x</hp:t></hp:run></hp:p></hp:subList></hp:tc></hp:tr></hp:tbl>"
+        )
         r = h.HwpxReader.__new__(h.HwpxReader)
         r.doc, r.fills = h.Doc("hwpx"), {}
         with self.assertRaises(ValueError):
@@ -635,18 +823,35 @@ class Fixtures(unittest.TestCase):
         def small_file_limit():  # a real write failure (EFBIG) once output passes 1000 bytes
             resource.setrlimit(resource.RLIMIT_FSIZE, (1000, 1000))
 
-        r = subprocess.run([sys.executable, SCRIPT, "convert", os.path.join(FIX, "sk-openinno-form.hwpx"),
-                            "--to", "docx", "-o", out], capture_output=True, text=True, preexec_fn=small_file_limit)
+        r = subprocess.run(
+            [
+                sys.executable,
+                SCRIPT,
+                "convert",
+                os.path.join(FIX, "sk-openinno-form.hwpx"),
+                "--to",
+                "docx",
+                "-o",
+                out,
+            ],
+            capture_output=True,
+            text=True,
+            preexec_fn=small_file_limit,
+        )
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(_read(out), b"previous result")
-        self.assertEqual(sorted(os.listdir(self.tmp)), ["existing.docx"])  # no temp file left behind
+        self.assertEqual(
+            sorted(os.listdir(self.tmp)), ["existing.docx"]
+        )  # no temp file left behind
 
     def test_convert_output_has_normal_permissions(self):
         out = os.path.join(self.tmp, "fresh.docx")
         self._convert(out)
         umask = os.umask(0)
         os.umask(umask)
-        self.assertEqual(os.stat(out).st_mode & 0o777, 0o666 & ~umask)  # not mkstemp's 0600
+        self.assertEqual(
+            os.stat(out).st_mode & 0o777, 0o666 & ~umask
+        )  # not mkstemp's 0600
 
     def test_convert_keeps_existing_output_permissions(self):
         out = os.path.join(self.tmp, "private.docx")
@@ -659,11 +864,15 @@ class Fixtures(unittest.TestCase):
     def test_docx_output_is_deterministic(self):
         doc = h.load(os.path.join(FIX, "sk-openinno-form.hwpx"))
         first = h.to_docx(doc)
-        time.sleep(2.1)  # a ZIP timestamp has 2-second resolution; always cross a tick boundary
+        time.sleep(
+            2.1
+        )  # a ZIP timestamp has 2-second resolution; always cross a tick boundary
         self.assertEqual(first, h.to_docx(doc))
 
     def test_docx_rejects_overlapping_cells(self):
-        dup = [h.Cell(0, 0, 500, 1, [h.Para("x")]) for _ in range(1000)]  # same slot, large rowspan
+        dup = [
+            h.Cell(0, 0, 500, 1, [h.Para("x")]) for _ in range(1000)
+        ]  # same slot, large rowspan
         with self.assertRaises(ValueError):
             h.to_docx(h.Doc("hwpx", blocks=[h.Table(500, 1, dup)]))
 
@@ -682,28 +891,65 @@ class Fixtures(unittest.TestCase):
             for info in zin.infolist():
                 data = zin.read(info.filename)
                 if info.filename == "Preview/PrvText.txt":
-                    data = "\r\n".join(f"<본문에 없는 미리보기 줄 {i}>" for i in range(20)).encode("utf-8")
+                    data = "\r\n".join(
+                        f"<본문에 없는 미리보기 줄 {i}>" for i in range(20)
+                    ).encode("utf-8")
                 zout.writestr(info, data)
-        r = subprocess.run([sys.executable, SCRIPT, "convert", p, "--to", "docx", "-o",
-                            os.path.join(self.tmp, "out.docx")], capture_output=True, text=True)
+        r = subprocess.run(
+            [
+                sys.executable,
+                SCRIPT,
+                "convert",
+                p,
+                "--to",
+                "docx",
+                "-o",
+                os.path.join(self.tmp, "out.docx"),
+            ],
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
         self.assertIn("preview_coverage", r.stdout)
 
     def test_cli_convert_docx(self):
         out = os.path.join(self.tmp, "form.docx")
-        r = subprocess.run([sys.executable, SCRIPT, "convert", os.path.join(FIX, "sk-openinno-form.hwpx"),
-                            "--to", "docx", "-o", out], capture_output=True, text=True)
+        r = subprocess.run(
+            [
+                sys.executable,
+                SCRIPT,
+                "convert",
+                os.path.join(FIX, "sk-openinno-form.hwpx"),
+                "--to",
+                "docx",
+                "-o",
+                out,
+            ],
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         if shutil.which("textutil"):  # macOS: an independent DOCX reader
-            txt = subprocess.run(["textutil", "-convert", "txt", "-stdout", out], capture_output=True, text=True)
+            txt = subprocess.run(
+                ["textutil", "-convert", "txt", "-stdout", out],
+                capture_output=True,
+                text=True,
+            )
             self.assertIn("참가신청서", txt.stdout)
 
     def test_cli_exit_codes(self):
-        r = subprocess.run([sys.executable, SCRIPT, "extract", os.path.join(FIX, "e-phi-design.hwp")],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "extract", os.path.join(FIX, "e-phi-design.hwp")],
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("예측경보시스템", r.stdout)
-        r = subprocess.run([sys.executable, SCRIPT, "extract", __file__], capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "extract", __file__],
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(r.returncode, 3)
 
 

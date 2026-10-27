@@ -15,6 +15,7 @@ Exit codes: 0 ok, 1 runtime error, 2 usage, 3 unsupported/protected document,
 When the `rhwp` CLI (github.com/edwardkim/rhwp) is on PATH, prefer it for rendering;
 this script's own parser is the dependency-free path that works anywhere Python 3.8+ runs.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -29,10 +30,10 @@ import struct
 import subprocess
 import sys
 import tempfile
-import zipfile
-import zlib
 import xml.etree.ElementTree as ET
 import xml.parsers.expat
+import zipfile
+import zlib
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Union
 
@@ -46,7 +47,9 @@ class Unsupported(Exception):
 # inflate into an out-of-memory crash.
 MAX_PART_BYTES = 128 * 1024 * 1024
 MAX_DOC_BYTES = 256 * 1024 * 1024
-INFLATE_CHUNK = 1024 * 1024  # inflate in steps so work is charged even if zlib then fails
+INFLATE_CHUNK = (
+    1024 * 1024
+)  # inflate in steps so work is charged even if zlib then fails
 # Cell addresses and spans come from the document too: one cell can claim row or column
 # 65,535 (HWP5) or any integer (HWPX), and every renderer that materializes a grid
 # (pipe tables, HTML rows, DOCX slots) would build it in full. Cap the slots per render.
@@ -60,13 +63,16 @@ class _GridBudget:
     def spend(self, nrows: int, ncols: int) -> None:
         self.left -= nrows * ncols
         if self.left < 0:
-            raise Unsupported(f"표 격자가 너무 큽니다 ({nrows}×{ncols}). 문서 전체 한도 "
-                              f"{MAX_GRID_CELLS}칸을 넘어 처리하지 않습니다.")
+            raise Unsupported(
+                f"표 격자가 너무 큽니다 ({nrows}×{ncols}). 문서 전체 한도 "
+                f"{MAX_GRID_CELLS}칸을 넘어 처리하지 않습니다."
+            )
 
 
 def _inflate_bound(n_in: int) -> int:
     """Most output raw deflate can produce from n_in input bytes: at most 1032x expansion,
-    plus what zlib may still hold from earlier input (a 32 KiB window and one 258-byte match)."""
+    plus what zlib may still hold from earlier input (a 32 KiB window and one 258-byte match).
+    """
     return n_in * 1032 + 32 * 1024 + 258
 
 
@@ -93,8 +99,10 @@ class _Budget:
 
 
 def _too_large(what: str, limit: int) -> Unsupported:
-    return Unsupported(f"{what}의 압축 해제 크기가 남은 한도({limit} 바이트)를 넘습니다. "
-                       "손상되었거나 압축 폭탄일 수 있는 문서라 읽지 않습니다.")
+    return Unsupported(
+        f"{what}의 압축 해제 크기가 남은 한도({limit} 바이트)를 넘습니다. "
+        "손상되었거나 압축 폭탄일 수 있는 문서라 읽지 않습니다."
+    )
 
 
 def _inflate(raw: bytes, what: str, budget: _Budget) -> bytes:
@@ -105,7 +113,9 @@ def _inflate(raw: bytes, what: str, budget: _Budget) -> bytes:
     # Inflate in chunks and charge each one as it is produced, so a stream that is
     # later rejected (truncated, invalid block, oversized) still pays for its work.
     while not d.eof:
-        want = min(INFLATE_CHUNK, limit + 1 - len(out))  # >= 1: zlib reads max_length=0 as "no limit"
+        want = min(
+            INFLATE_CHUNK, limit + 1 - len(out)
+        )  # >= 1: zlib reads max_length=0 as "no limit"
         try:
             chunk = d.decompress(data, want)
         except zlib.error:
@@ -138,8 +148,11 @@ def _zip_read(z: zipfile.ZipFile, name: str, budget: _Budget) -> bytes:
 def _xml(data: bytes):
     """OWPML never declares a DTD; refusing one closes entity-expansion attacks.
     expat detects the document encoding itself, so this also holds for UTF-16 input."""
+
     def refuse(*_):
-        raise Unsupported("HWPX XML에 DTD/엔티티 선언이 있습니다. 정상 HWPX에는 없는 구조라 읽지 않습니다.")
+        raise Unsupported(
+            "HWPX XML에 DTD/엔티티 선언이 있습니다. 정상 HWPX에는 없는 구조라 읽지 않습니다."
+        )
 
     p = xml.parsers.expat.ParserCreate()
     p.StartDoctypeDeclHandler = refuse
@@ -153,10 +166,11 @@ def _xml(data: bytes):
 
 # ───────────────────────────── intermediate representation ─────────────────────────────
 
+
 @dataclass
 class Para:
     text: str
-    kind: str = "p"          # p | textbox
+    kind: str = "p"  # p | textbox
 
 
 @dataclass
@@ -185,16 +199,19 @@ Block = Union[Para, Table]
 class Doc:
     fmt: str
     blocks: List[Block] = field(default_factory=list)
-    notes: List[List[Block]] = field(default_factory=list)   # footnotes/endnotes
-    images: List[str] = field(default_factory=list)          # BinData names referenced
+    notes: List[List[Block]] = field(default_factory=list)  # footnotes/endnotes
+    images: List[str] = field(default_factory=list)  # BinData names referenced
     preview_text: str = ""
     meta: dict = field(default_factory=dict)
-    counters: dict = field(default_factory=lambda: {"equations": 0, "pictures": 0, "textboxes": 0})
+    counters: dict = field(
+        default_factory=lambda: {"equations": 0, "pictures": 0, "textboxes": 0}
+    )
     # The reader's decompression budget, so later reads of the same file (images) share it.
     budget: _Budget = field(default_factory=_Budget, repr=False, compare=False)
 
 
 # ───────────────────────────── minimal CFB (OLE2) reader ─────────────────────────────
+
 
 class CFB:
     """Just enough of MS-CFB to read named streams. Read-only, no olefile dependency."""
@@ -208,7 +225,9 @@ class CFB:
         self.ss = 1 << struct.unpack_from("<H", data, 0x1E)[0]
         self.mss = 1 << struct.unpack_from("<H", data, 0x20)[0]
         n_fat, first_dir = struct.unpack_from("<II", data, 0x2C)
-        self.mini_cutoff, first_mfat, _n_mfat, first_difat, n_difat = struct.unpack_from("<IIIII", data, 0x38)
+        self.mini_cutoff, first_mfat, _n_mfat, first_difat, n_difat = (
+            struct.unpack_from("<IIIII", data, 0x38)
+        )
         difat = list(struct.unpack_from("<109I", data, 0x4C))
         s = first_difat
         n_secs = len(data) // self.ss - 1
@@ -228,18 +247,31 @@ class CFB:
         dir_bytes = self._chain(first_dir)
         self.entries = []
         for off in range(0, len(dir_bytes), 128):
-            e = dir_bytes[off:off + 128]
+            e = dir_bytes[off : off + 128]
             nlen = struct.unpack_from("<H", e, 64)[0]
-            name = e[:max(nlen - 2, 0)].decode("utf-16-le", "replace")
+            name = e[: max(nlen - 2, 0)].decode("utf-16-le", "replace")
             etype = e[66]
             left, right, child = struct.unpack_from("<III", e, 68)
             start, size = struct.unpack_from("<IQ", e, 116)
             if self.ss == 512:
                 size &= 0xFFFFFFFF
-            self.entries.append(dict(name=name, type=etype, left=left, right=right,
-                                     child=child, start=start, size=size))
+            self.entries.append(
+                dict(
+                    name=name,
+                    type=etype,
+                    left=left,
+                    right=right,
+                    child=child,
+                    start=start,
+                    size=size,
+                )
+            )
         root = self.entries[0]
-        self.ministream = self._chain(root["start"])[:root["size"]] if root["start"] < self.ENDOFCHAIN else b""
+        self.ministream = (
+            self._chain(root["start"])[: root["size"]]
+            if root["start"] < self.ENDOFCHAIN
+            else b""
+        )
         self.minifat: List[int] = []
         if first_mfat < self.ENDOFCHAIN:
             mf = self._chain(first_mfat)
@@ -250,7 +282,7 @@ class CFB:
 
     def _sec(self, n: int) -> bytes:
         o = (n + 1) * self.ss
-        return self.d[o:o + self.ss]
+        return self.d[o : o + self.ss]
 
     def _chain(self, start: int) -> bytes:
         out, s, seen = bytearray(), start, set()
@@ -264,7 +296,7 @@ class CFB:
         out, s, seen = bytearray(), start, set()
         while s < self.ENDOFCHAIN and s not in seen and s < len(self.minifat):
             seen.add(s)
-            out += self.ministream[s * self.mss:(s + 1) * self.mss]
+            out += self.ministream[s * self.mss : (s + 1) * self.mss]
             s = self.minifat[s]
         return bytes(out)
 
@@ -272,7 +304,12 @@ class CFB:
         stack = [idx]
         while stack:
             i = stack.pop()
-            if i >= len(self.entries) or i >= self.ENDOFCHAIN or depth > 32 or i in self._seen:
+            if (
+                i >= len(self.entries)
+                or i >= self.ENDOFCHAIN
+                or depth > 32
+                or i in self._seen
+            ):
                 continue
             self._seen.add(i)  # malformed sibling/child links can form cycles
             e = self.entries[i]
@@ -288,22 +325,46 @@ class CFB:
     def read(self, path: str) -> bytes:
         e = self.paths[path]
         if e["size"] < self.mini_cutoff:
-            return self._minichain(e["start"])[:e["size"]]
-        return self._chain(e["start"])[:e["size"]]
+            return self._minichain(e["start"])[: e["size"]]
+        return self._chain(e["start"])[: e["size"]]
 
     def list(self, prefix: str = "") -> List[str]:
-        return sorted(p for p, e in self.paths.items() if e["type"] == 2 and p.startswith(prefix))
+        return sorted(
+            p for p, e in self.paths.items() if e["type"] == 2 and p.startswith(prefix)
+        )
 
 
 # ───────────────────────────── HWP 5.0 (binary) ─────────────────────────────
 
 TAG_BORDER_FILL = 0x14  # DocInfo
-TAG_PARA_HEADER, TAG_PARA_TEXT, TAG_CTRL_HEADER, TAG_LIST_HEADER = 0x42, 0x43, 0x47, 0x48
+TAG_PARA_HEADER, TAG_PARA_TEXT, TAG_CTRL_HEADER, TAG_LIST_HEADER = (
+    0x42,
+    0x43,
+    0x47,
+    0x48,
+)
 TAG_TABLE, TAG_SHAPE_PICTURE, TAG_EQEDIT = 0x4D, 0x55, 0x58
 EXTENDED_CTRL = {1, 2, 3, 11, 12, 14, 15, 16, 17, 18, 21, 22, 23}
 INLINE_CTRL = {4, 5, 6, 7, 8, 9, 19, 20}
 # BORDER_FILL line widths are an index into this table (mm); HWPX writes the same values as text.
-HWP5_LINE_MM = (0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0)
+HWP5_LINE_MM = (
+    0.1,
+    0.12,
+    0.15,
+    0.2,
+    0.25,
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.7,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+)
 
 
 @dataclass
@@ -324,11 +385,15 @@ def _records(buf: bytes) -> List[Rec]:
             size = struct.unpack_from("<I", buf, i)[0]
             i += 4
         if i + size > len(buf):
-            raise ValueError(f"레코드(tag {tag:#x})가 섹션 끝을 넘습니다 (손상되었거나 잘린 문서).")
-        out.append(Rec(tag, level, buf[i:i + size]))
+            raise ValueError(
+                f"레코드(tag {tag:#x})가 섹션 끝을 넘습니다 (손상되었거나 잘린 문서)."
+            )
+        out.append(Rec(tag, level, buf[i : i + size]))
         i += size
     if i != len(buf):
-        raise ValueError(f"섹션 끝에 불완전한 레코드 헤더 {len(buf) - i}바이트가 있습니다 (잘린 문서).")
+        raise ValueError(
+            f"섹션 끝에 불완전한 레코드 헤더 {len(buf) - i}바이트가 있습니다 (잘린 문서)."
+        )
     return out
 
 
@@ -371,13 +436,21 @@ class Hwp5Reader:
         self.compressed = bool(self.flags & 0x01)
         self.fills: list = []  # BORDER_FILL entries, read with the body
         self.doc = Doc("hwp5", budget=self.budget)
-        self.doc.meta.update(version=self.version, compressed=self.compressed,
-                             password=bool(self.flags & 0x02), distribution=bool(self.flags & 0x04))
+        self.doc.meta.update(
+            version=self.version,
+            compressed=self.compressed,
+            password=bool(self.flags & 0x02),
+            distribution=bool(self.flags & 0x04),
+        )
         if self.flags & 0x02:
-            raise Unsupported("암호가 걸린 HWP 문서입니다. 한컴오피스/HOP에서 암호를 풀어 다시 저장해야 합니다.")
+            raise Unsupported(
+                "암호가 걸린 HWP 문서입니다. 한컴오피스/HOP에서 암호를 풀어 다시 저장해야 합니다."
+            )
         if self.flags & 0x04:
-            raise Unsupported("배포용(복사·인쇄 제한) HWP 문서입니다. 본문(ViewText)이 암호화되어 있어 "
-                              "이 파서로는 읽을 수 없습니다. `rhwp convert`로 풀거나 HOP에서 PDF로 내보내세요.")
+            raise Unsupported(
+                "배포용(복사·인쇄 제한) HWP 문서입니다. 본문(ViewText)이 암호화되어 있어 "
+                "이 파서로는 읽을 수 없습니다. `rhwp convert`로 풀거나 HOP에서 PDF로 내보내세요."
+            )
 
     def _stream(self, path: str) -> bytes:
         raw = self.cfb.read(path)
@@ -385,7 +458,9 @@ class Hwp5Reader:
 
     def read(self) -> Doc:
         if self.cfb.exists("PrvText"):
-            self.doc.preview_text = self.cfb.read("PrvText").decode("utf-16-le", "replace")
+            self.doc.preview_text = self.cfb.read("PrvText").decode(
+                "utf-16-le", "replace"
+            )
         self.fills = self._border_fills()
         n = 0
         while self.cfb.exists(f"BodyText/Section{n}"):
@@ -412,12 +487,18 @@ class Hwp5Reader:
         for r in recs:
             if r.tag != TAG_BORDER_FILL:
                 continue
-            if len(r.data) < 26:  # attribute UINT16, then left, right, top, bottom: type, width, colour
+            if (
+                len(r.data) < 26
+            ):  # attribute UINT16, then left, right, top, bottom: type, width, colour
                 fills.append(None)
                 continue
-            left, right, top, bottom = (r.data[2 + 6 * k:4 + 6 * k] for k in range(4))
-            fills.append(tuple(None if t == 0 else HWP5_LINE_MM[min(w, len(HWP5_LINE_MM) - 1)]
-                               for t, w in (top, left, bottom, right)))
+            left, right, top, bottom = (r.data[2 + 6 * k : 4 + 6 * k] for k in range(4))
+            fills.append(
+                tuple(
+                    None if t == 0 else HWP5_LINE_MM[min(w, len(HWP5_LINE_MM) - 1)]
+                    for t, w in (top, left, bottom, right)
+                )
+            )
         return fills
 
     def _paras(self, siblings: List[Rec]) -> List[Block]:
@@ -487,7 +568,7 @@ class Hwp5Reader:
             script = ""
             if eq is not None and len(eq.data) >= 6:
                 ln = struct.unpack_from("<H", eq.data, 4)[0]
-                script = eq.data[6:6 + ln * 2].decode("utf-16-le", "replace")
+                script = eq.data[6 : 6 + ln * 2].decode("utf-16-le", "replace")
             return [f" [수식: {script.strip()}] " if script.strip() else " [수식] "]
         if cid == "gso ":
             out: list = []
@@ -507,7 +588,11 @@ class Hwp5Reader:
 
     def _table(self, c: Rec) -> Table:
         t = _find(c, TAG_TABLE)
-        rows, cols = (struct.unpack_from("<HH", t.data, 4) if t is not None and len(t.data) >= 8 else (0, 0))
+        rows, cols = (
+            struct.unpack_from("<HH", t.data, 4)
+            if t is not None and len(t.data) >= 8
+            else (0, 0)
+        )
         cells: List[Cell] = []
         cur: Optional[Cell] = None
         paras: List[Rec] = []
@@ -516,8 +601,16 @@ class Hwp5Reader:
                 if cur is not None:
                     cur.blocks = self._paras(paras)
                     cells.append(cur)
-                col, row, cs, rs = struct.unpack_from("<HHHH", ch.data, 8) if len(ch.data) >= 16 else (0, 0, 1, 1)
-                bf = struct.unpack_from("<H", ch.data, 32)[0] if len(ch.data) >= 34 else 0
+                col, row, cs, rs = (
+                    struct.unpack_from("<HHHH", ch.data, 8)
+                    if len(ch.data) >= 16
+                    else (0, 0, 1, 1)
+                )
+                bf = (
+                    struct.unpack_from("<H", ch.data, 32)[0]
+                    if len(ch.data) >= 34
+                    else 0
+                )
                 borders = self.fills[bf - 1] if 1 <= bf <= len(self.fills) else None
                 cur, paras = Cell(row, col, max(rs, 1), max(cs, 1), [], borders), []
             elif ch.tag == TAG_PARA_HEADER and cur is not None:
@@ -584,7 +677,8 @@ def _width_mm(text: str) -> float:
 
 def _outer_sublists(el) -> list:
     """hp:subList elements under el that are not nested inside another subList;
-    nested ones (table cells, inner drawings) are reached when the outer list is parsed."""
+    nested ones (table cells, inner drawings) are reached when the outer list is parsed.
+    """
     out = []
     for ch in el:
         if ch.tag == HP + "subList":
@@ -599,12 +693,24 @@ class HwpxReader:
         self.z = zipfile.ZipFile(io.BytesIO(data))
         self.budget = _Budget()
         names = set(self.z.namelist())
-        mime = _zip_read(self.z, "mimetype", self.budget).decode(errors="replace").strip() if "mimetype" in names else ""
+        mime = (
+            _zip_read(self.z, "mimetype", self.budget).decode(errors="replace").strip()
+            if "mimetype" in names
+            else ""
+        )
         if mime and "hwp" not in mime:
             raise Unsupported(f"ZIP 컨테이너지만 HWPX가 아닙니다 (mimetype={mime})")
         if not mime and "Contents/content.hpf" not in names:
-            raise Unsupported("ZIP 컨테이너지만 HWPX 패키지 표지(mimetype, Contents/content.hpf)가 없습니다.")
-        manifest = _zip_read(self.z, "META-INF/manifest.xml", self.budget).decode(errors="replace") if "META-INF/manifest.xml" in names else ""
+            raise Unsupported(
+                "ZIP 컨테이너지만 HWPX 패키지 표지(mimetype, Contents/content.hpf)가 없습니다."
+            )
+        manifest = (
+            _zip_read(self.z, "META-INF/manifest.xml", self.budget).decode(
+                errors="replace"
+            )
+            if "META-INF/manifest.xml" in names
+            else ""
+        )
         if "encryption-data" in manifest:
             raise Unsupported("암호화된 HWPX 문서입니다.")
         self.fills: dict = {}  # hh:borderFill by id, read with the body
@@ -623,13 +729,25 @@ class HwpxReader:
     def _sections(self, hpf) -> List[str]:
         names = self.z.namelist()
         if hpf is not None:
-            items = {i.get("id"): i.get("href") for i in hpf.iter() if _local(i.tag) == "item"}
-            spine = [items.get(r.get("idref")) for r in hpf.iter() if _local(r.tag) == "itemref"]
+            items = {
+                i.get("id"): i.get("href")
+                for i in hpf.iter()
+                if _local(i.tag) == "item"
+            }
+            spine = [
+                items.get(r.get("idref"))
+                for r in hpf.iter()
+                if _local(r.tag) == "itemref"
+            ]
             secs = [s for s in spine if s and re.search(r"section\d+\.xml$", s)]
             if secs:
-                return [s if s in names else "Contents/" + s.split("/")[-1] for s in secs]
-        return sorted((n for n in names if re.match(r"Contents/section\d+\.xml$", n)),
-                      key=lambda s: int(re.findall(r"\d+", s)[-1]))
+                return [
+                    s if s in names else "Contents/" + s.split("/")[-1] for s in secs
+                ]
+        return sorted(
+            (n for n in names if re.match(r"Contents/section\d+\.xml$", n)),
+            key=lambda s: int(re.findall(r"\d+", s)[-1]),
+        )
 
     def read(self) -> Doc:
         names = set(self.z.namelist())
@@ -648,12 +766,16 @@ class HwpxReader:
         self.fills = self._border_fills()
         secs = self._sections(hpf)
         if not secs:
-            raise Unsupported("HWPX 패키지에 본문 섹션(Contents/sectionN.xml)이 없습니다.")
+            raise Unsupported(
+                "HWPX 패키지에 본문 섹션(Contents/sectionN.xml)이 없습니다."
+            )
         for s in secs:
             root = _xml(_zip_read(self.z, s, self.budget))
             self.doc.blocks.extend(self._paras(root))
         self.doc.meta["sections"] = len(secs)
-        self.doc.images = sorted(n.split("/", 1)[1] for n in names if n.startswith("BinData/"))
+        self.doc.images = sorted(
+            n.split("/", 1)[1] for n in names if n.startswith("BinData/")
+        )
         return self.doc
 
     def _border_fills(self) -> dict:
@@ -674,8 +796,13 @@ class HwpxReader:
             side = {_local(s.tag): s for s in bf}
             try:
                 fills[bf.get("id")] = tuple(
-                    None if side[k].get("type", "NONE") == "NONE" else _width_mm(side[k].get("width", "0.1 mm"))
-                    for k in ("topBorder", "leftBorder", "bottomBorder", "rightBorder"))
+                    (
+                        None
+                        if side[k].get("type", "NONE") == "NONE"
+                        else _width_mm(side[k].get("width", "0.1 mm"))
+                    )
+                    for k in ("topBorder", "leftBorder", "bottomBorder", "rightBorder")
+                )
             except (KeyError, ValueError, IndexError):
                 continue  # incomplete definition: cells that use it take the table default
         return fills
@@ -768,19 +895,24 @@ class HwpxReader:
                 row = int(addr.get("rowAddr", 0)) if addr is not None else 0
                 col = int(addr.get("colAddr", 0)) if addr is not None else 0
                 if row < 0 or col < 0:
-                    raise ValueError(f"표 셀 주소가 음수입니다 (rowAddr={row}, colAddr={col}; 손상된 문서).")
-                cells.append(Cell(
-                    row,
-                    col,
-                    max(int(span.get("rowSpan", 1)), 1) if span is not None else 1,
-                    max(int(span.get("colSpan", 1)), 1) if span is not None else 1,
-                    self._paras(sub) if sub is not None else [],
-                    self.fills.get(tc.get("borderFillIDRef")),
-                ))
+                    raise ValueError(
+                        f"표 셀 주소가 음수입니다 (rowAddr={row}, colAddr={col}; 손상된 문서)."
+                    )
+                cells.append(
+                    Cell(
+                        row,
+                        col,
+                        max(int(span.get("rowSpan", 1)), 1) if span is not None else 1,
+                        max(int(span.get("colSpan", 1)), 1) if span is not None else 1,
+                        self._paras(sub) if sub is not None else [],
+                        self.fills.get(tc.get("borderFillIDRef")),
+                    )
+                )
         return Table(rows, cols, cells)
 
 
 # ───────────────────────────── Markdown rendering ─────────────────────────────
+
 
 def _norm(s: str) -> str:
     return re.sub(r"[ \t 　]+", " ", s).strip()
@@ -799,8 +931,12 @@ def _cell_text(blocks: List[Block], html_mode: bool, grid: _GridBudget) -> str:
 
 
 def _simple(t: Table) -> bool:
-    return all(c.rowspan == 1 and c.colspan == 1 and not any(isinstance(b, Table) for b in c.blocks)
-               for c in t.cells)
+    return all(
+        c.rowspan == 1
+        and c.colspan == 1
+        and not any(isinstance(b, Table) for b in c.blocks)
+        for c in t.cells
+    )
 
 
 def _is_layout(t: Table) -> bool:
@@ -814,8 +950,10 @@ def _is_layout(t: Table) -> bool:
 
 
 def _flatten(t: Table, grid: _GridBudget) -> str:
-    texts = [_cell_text(c.blocks, False, grid).replace(" <br> ", "\n")
-             for c in sorted(t.cells, key=lambda c: (c.row, c.col))]
+    texts = [
+        _cell_text(c.blocks, False, grid).replace(" <br> ", "\n")
+        for c in sorted(t.cells, key=lambda c: (c.row, c.col))
+    ]
     texts = [x for x in texts if x.strip()]
     one_row = len({c.row for c in t.cells}) == 1
     return (" | " if one_row else "\n").join(texts)
@@ -851,8 +989,9 @@ def _table_html(t: Table, grid: _GridBudget) -> str:
     for r in range(last + 1):
         tds = []
         for c in rows.get(r, []):
-            attrs = (f' rowspan="{c.rowspan}"' if c.rowspan > 1 else "") + \
-                    (f' colspan="{c.colspan}"' if c.colspan > 1 else "")
+            attrs = (f' rowspan="{c.rowspan}"' if c.rowspan > 1 else "") + (
+                f' colspan="{c.colspan}"' if c.colspan > 1 else ""
+            )
             tds.append(f"<td{attrs}>{_cell_text(c.blocks, True, grid)}</td>")
         out.append("<tr>" + "".join(tds) + "</tr>")
     out.append("</table>")
@@ -885,8 +1024,14 @@ def to_markdown(doc: Doc) -> str:
     if doc.notes:
         out.append("")
         for i, body in enumerate(doc.notes, 1):
-            parts = [_norm(x.text.replace("\n", " ")) if isinstance(x, Para)
-                     else _table_html(x, grid).replace("\n", "") for x in body]
+            parts = [
+                (
+                    _norm(x.text.replace("\n", " "))
+                    if isinstance(x, Para)
+                    else _table_html(x, grid).replace("\n", "")
+                )
+                for x in body
+            ]
             note = " ".join(p for p in parts if p)
             out.append(f"[^{i}]: {note}")
     md = "\n".join(out)
@@ -900,8 +1045,10 @@ def to_markdown(doc: Doc) -> str:
 
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
-_TBL_BORDERS = "".join(f'<w:{s} w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
-                       for s in ("top", "left", "bottom", "right", "insideH", "insideV"))
+_TBL_BORDERS = "".join(
+    f'<w:{s} w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+    for s in ("top", "left", "bottom", "right", "insideH", "insideV")
+)
 _TEXT_WIDTH = 9638  # twips between A4 margins of 1134 twips (2 cm)
 
 
@@ -914,31 +1061,62 @@ def _docx_para(text: str, indent: bool = False) -> str:
             if j:
                 runs.append("<w:tab/>")
             if part:
-                runs.append(f'<w:t xml:space="preserve">{html.escape(_XML_ILLEGAL.sub("", part), quote=False)}</w:t>')
-    ppr = '<w:pPr><w:ind w:left="567"/></w:pPr>' if indent else ""  # text boxes, like "> " in Markdown
-    return f"<w:p>{ppr}<w:r>{''.join(runs)}</w:r></w:p>" if runs else f"<w:p>{ppr}</w:p>"
+                runs.append(
+                    f'<w:t xml:space="preserve">{html.escape(_XML_ILLEGAL.sub("", part), quote=False)}</w:t>'
+                )
+    ppr = (
+        '<w:pPr><w:ind w:left="567"/></w:pPr>' if indent else ""
+    )  # text boxes, like "> " in Markdown
+    return (
+        f"<w:p>{ppr}<w:r>{''.join(runs)}</w:r></w:p>" if runs else f"<w:p>{ppr}</w:p>"
+    )
 
 
 def _docx_blocks(blocks: List[Block], grid: _GridBudget) -> List[str]:
-    return [_docx_table(b, grid) if isinstance(b, Table) else _docx_para(b.text, b.kind == "textbox")
-            for b in blocks]
+    return [
+        (
+            _docx_table(b, grid)
+            if isinstance(b, Table)
+            else _docx_para(b.text, b.kind == "textbox")
+        )
+        for b in blocks
+    ]
 
 
 def _docx_border(side: str, mm: Optional[float]) -> str:
     if mm is None:
         return f'<w:{side} w:val="nil"/>'
-    sz = min(max(round(mm / 25.4 * 72 * 8), 2), 96)  # eighths of a point, Word's allowed range
+    sz = min(
+        max(round(mm / 25.4 * 72 * 8), 2), 96
+    )  # eighths of a point, Word's allowed range
     return f'<w:{side} w:val="single" w:sz="{sz}" w:space="0" w:color="000000"/>'
 
 
-def _docx_cell(span: int, vmerge: Optional[str], content: List[str],
-               borders: Optional[Tuple[Optional[float], ...]] = None) -> str:
+def _docx_cell(
+    span: int,
+    vmerge: Optional[str],
+    content: List[str],
+    borders: Optional[Tuple[Optional[float], ...]] = None,
+) -> str:
     # Children of w:tcPr and w:tcBorders must follow the schema order, or Word rejects the file.
-    props = (f'<w:gridSpan w:val="{span}"/>' if span > 1 else "") + \
-            ('<w:vMerge w:val="restart"/>' if vmerge == "restart" else "<w:vMerge/>" if vmerge else "")
-    if borders is not None:  # all four sides, so nothing falls through to the table's inside lines
-        props += "<w:tcBorders>" + "".join(_docx_border(s, mm) for s, mm in
-                                           zip(("top", "left", "bottom", "right"), borders)) + "</w:tcBorders>"
+    props = (f'<w:gridSpan w:val="{span}"/>' if span > 1 else "") + (
+        '<w:vMerge w:val="restart"/>'
+        if vmerge == "restart"
+        else "<w:vMerge/>" if vmerge else ""
+    )
+    if (
+        borders is not None
+    ):  # all four sides, so nothing falls through to the table's inside lines
+        props += (
+            "<w:tcBorders>"
+            + "".join(
+                _docx_border(s, mm)
+                for s, mm in zip(
+                    ("top", "left", "bottom", "right"), borders, strict=False
+                )
+            )
+            + "</w:tcBorders>"
+        )
     body = "".join(content)
     if not content or content[-1].startswith("<w:tbl"):
         body += "<w:p/>"  # Word requires every cell to end with a paragraph
@@ -959,7 +1137,9 @@ def _docx_table(t: Table, grid: _GridBudget) -> str:
         for r in range(c.row, c.row + c.rowspan):
             for k in range(c.col, c.col + c.colspan):
                 if (r, k) in owner:
-                    raise ValueError(f"표 셀이 서로 겹칩니다 (행 {r}, 열 {k}; 손상된 문서).")
+                    raise ValueError(
+                        f"표 셀이 서로 겹칩니다 (행 {r}, 열 {k}; 손상된 문서)."
+                    )
                 owner[(r, k)] = c
     rows = []
     for r in range(nrows):
@@ -970,30 +1150,43 @@ def _docx_table(t: Table, grid: _GridBudget) -> str:
                 tcs.append(_docx_cell(1, None, []))
                 col += 1
             elif c.row == r:
-                tcs.append(_docx_cell(c.colspan, "restart" if c.rowspan > 1 else None,
-                                      _docx_blocks(c.blocks, grid), c.borders))
+                tcs.append(
+                    _docx_cell(
+                        c.colspan,
+                        "restart" if c.rowspan > 1 else None,
+                        _docx_blocks(c.blocks, grid),
+                        c.borders,
+                    )
+                )
                 col += c.colspan
             else:  # continuation of a vertical merge started above
                 tcs.append(_docx_cell(c.colspan, "continue", [], c.borders))
                 col += c.colspan
         rows.append("<w:tr>" + "".join(tcs) + "</w:tr>")
     grid = f'<w:gridCol w:w="{max(_TEXT_WIDTH // ncols, 1)}"/>' * ncols
-    return (f'<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>{_TBL_BORDERS}</w:tblBorders>'
-            f"</w:tblPr><w:tblGrid>{grid}</w:tblGrid>{''.join(rows)}</w:tbl>")
+    return (
+        f'<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>{_TBL_BORDERS}</w:tblBorders>'
+        f"</w:tblPr><w:tblGrid>{grid}</w:tblGrid>{''.join(rows)}</w:tbl>"
+    )
 
 
 def _zip_entry(name: str) -> zipfile.ZipInfo:
-    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))  # fixed: same input, same bytes
+    info = zipfile.ZipInfo(
+        name, date_time=(1980, 1, 1, 0, 0, 0)
+    )  # fixed: same input, same bytes
     info.compress_type = zipfile.ZIP_DEFLATED
     return info
 
 
 def write_docx(doc: Doc, f) -> None:
     """Write the DOCX package to a binary file object. document.xml is streamed one
-    top-level block at a time, so only the largest block is held as text, not the document."""
+    top-level block at a time, so only the largest block is held as text, not the document.
+    """
     grid = _GridBudget()
-    sect = ('<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" '
-            'w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr>')
+    sect = (
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" '
+        'w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr>'
+    )
     parts = {
         "[Content_Types].xml": (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -1001,22 +1194,28 @@ def write_docx(doc: Doc, f) -> None:
             '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
             '<Default Extension="xml" ContentType="application/xml"/>'
             '<Override PartName="/word/document.xml" ContentType="application/'
-            'vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+            'vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+        ),
         "_rels/.rels": (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
-            'relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+            'relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+        ),
     }
     with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as z:
         for name, xml_text in parts.items():
             z.writestr(_zip_entry(name), xml_text.encode("utf-8"))
         with z.open(_zip_entry("word/document.xml"), "w") as w:
-            w.write(f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                    f'<w:document xmlns:w="{_W_NS}"><w:body>'.encode("utf-8"))
+            w.write(
+                f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<w:document xmlns:w="{_W_NS}"><w:body>'.encode("utf-8")
+            )
             for b in doc.blocks:
                 w.write(_docx_blocks([b], grid)[0].encode("utf-8"))
-            for i, note in enumerate(doc.notes, 1):  # notes as trailing paragraphs, matching the [^n] markers
+            for i, note in enumerate(
+                doc.notes, 1
+            ):  # notes as trailing paragraphs, matching the [^n] markers
                 w.write(_docx_para(f"[^{i}]:").encode("utf-8"))
                 for b in note:
                     w.write(_docx_blocks([b], grid)[0].encode("utf-8"))
@@ -1031,11 +1230,14 @@ def to_docx(doc: Doc) -> bytes:
 
 # ───────────────────────────── verification ─────────────────────────────
 
+
 def _squash(s: str) -> str:
     return re.sub(r"[\s 　<>|`*#>\-]+", "", html.unescape(re.sub(r"<[^>]+>", "", s)))
 
 
-PRVTEXT_CAP = 1000  # Hancom truncates PrvText at about 1K characters (1,023 in both fixtures)
+PRVTEXT_CAP = (
+    1000  # Hancom truncates PrvText at about 1K characters (1,023 in both fixtures)
+)
 
 
 def preview_coverage(preview: str, md: str) -> Optional[float]:
@@ -1045,11 +1247,15 @@ def preview_coverage(preview: str, md: str) -> Optional[float]:
     if not preview.strip():
         return None
     body = _squash(md)
-    chunks = [c for c in (_squash(x) for x in re.split(r"[<>\r\n]+", preview)) if len(c) >= 4]
+    chunks = [
+        c for c in (_squash(x) for x in re.split(r"[<>\r\n]+", preview)) if len(c) >= 4
+    ]
     if not chunks:
         return None
     if len(preview) >= PRVTEXT_CAP:
-        chunks = chunks[:-1] or chunks  # cut mid-chunk at the size limit; a shorter preview is complete
+        chunks = (
+            chunks[:-1] or chunks
+        )  # cut mid-chunk at the size limit; a shorter preview is complete
     # A line repeated in the preview must appear that many times in the output.
     need = collections.Counter(chunks)
     hit = sum(min(k, body.count(c)) for c, k in need.items())
@@ -1071,14 +1277,25 @@ def stats(doc: Doc, md: str) -> dict:
 
     acc = walk(doc.blocks, {"paragraphs": 0, "tables": 0, "merged_tables": 0})
     cov = preview_coverage(doc.preview_text, md)
-    s = {"format": doc.fmt, **doc.meta, **acc, **doc.counters,
-         "notes": len(doc.notes), "embedded_files": len(doc.images),
-         "chars": len(md), "preview_coverage": cov}
+    s = {
+        "format": doc.fmt,
+        **doc.meta,
+        **acc,
+        **doc.counters,
+        "notes": len(doc.notes),
+        "embedded_files": len(doc.images),
+        "chars": len(md),
+        "preview_coverage": cov,
+    }
     warn = []
     if cov is not None and cov < 0.9:
-        warn.append(f"preview_coverage {cov} < 0.9 — 앞부분 텍스트 일부가 누락됐을 수 있음. render 경로로 교차 확인 권장")
+        warn.append(
+            f"preview_coverage {cov} < 0.9 — 앞부분 텍스트 일부가 누락됐을 수 있음. render 경로로 교차 확인 권장"
+        )
     if acc["paragraphs"] == 0 and acc["tables"] == 0:
-        warn.append("본문이 비어 있음 — 이미지/스캔 문서이거나 파서가 지원하지 않는 구조")
+        warn.append(
+            "본문이 비어 있음 — 이미지/스캔 문서이거나 파서가 지원하지 않는 구조"
+        )
     if doc.counters["equations"]:
         warn.append("수식은 원문 스크립트(한컴 수식 문법)로만 표기됨")
     s["warnings"] = warn
@@ -1086,6 +1303,7 @@ def stats(doc: Doc, md: str) -> dict:
 
 
 # ───────────────────────────── entry points ─────────────────────────────
+
 
 def detect(data: bytes) -> str:
     if data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
@@ -1108,10 +1326,14 @@ def load(path: str) -> Doc:
     if kind == "hwpx":
         return HwpxReader(data, path).read()
     if kind == "hwp3":
-        raise Unsupported("HWP 3.x(1990년대) 형식입니다. rhwp CLI(`rhwp export-markdown`)를 사용하세요.")
+        raise Unsupported(
+            "HWP 3.x(1990년대) 형식입니다. rhwp CLI(`rhwp export-markdown`)를 사용하세요."
+        )
     if kind == "hml":
         raise Unsupported("HML(XML) 형식입니다. rhwp CLI를 사용하세요.")
-    raise Unsupported("HWP/HWPX 시그니처가 아닙니다 (확장자와 무관하게 내용으로 판별함).")
+    raise Unsupported(
+        "HWP/HWPX 시그니처가 아닙니다 (확장자와 무관하게 내용으로 판별함)."
+    )
 
 
 def _safe_dest(outdir: str, member: str) -> Optional[str]:
@@ -1173,7 +1395,10 @@ def cmd_extract(a) -> int:
     st = stats(doc, md)
     if a.max_chars and len(md) > a.max_chars:
         omitted = len(md) - a.max_chars
-        md = md[:a.max_chars] + f"\n\n<!-- truncated: {omitted} chars omitted; rerun without --max-chars -->\n"
+        md = (
+            md[: a.max_chars]
+            + f"\n\n<!-- truncated: {omitted} chars omitted; rerun without --max-chars -->\n"
+        )
         st["truncated"], st["omitted_chars"] = True, omitted
     if a.images_dir:
         st["images_written"] = save_images(a.file, doc, a.images_dir)
@@ -1188,7 +1413,13 @@ def cmd_extract(a) -> int:
 
 def _exit_code(st: dict) -> int:
     """4 when the self-check suspects missing text (shared by extract and convert), else 0."""
-    return 4 if st["warnings"] and st.get("preview_coverage") is not None and st["preview_coverage"] < 0.9 else 0
+    return (
+        4
+        if st["warnings"]
+        and st.get("preview_coverage") is not None
+        and st["preview_coverage"] < 0.9
+        else 0
+    )
 
 
 def cmd_render(a) -> int:
@@ -1217,12 +1448,25 @@ def cmd_render(a) -> int:
     if not img:
         sys.stderr.write("rhwp가 없고 문서에 미리보기 이미지도 없습니다.\n")
         return 3
-    ext = ".png" if img[:4] == b"\x89PNG" else ".gif" if img[:3] == b"GIF" else ".bmp" if img[:2] == b"BM" else ".img"
+    ext = (
+        ".png"
+        if img[:4] == b"\x89PNG"
+        else ".gif" if img[:3] == b"GIF" else ".bmp" if img[:2] == b"BM" else ".img"
+    )
     dst = os.path.splitext(out)[0] + "_preview" + ext
     with open(dst, "wb") as f:
         f.write(img)
-    print(json.dumps({"backend": "embedded-preview", "output": dst, "pages": [0],
-                      "note": "첫 쪽 썸네일만 있음. 전체 쪽 렌더링은 rhwp 설치 필요"}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "backend": "embedded-preview",
+                "output": dst,
+                "pages": [0],
+                "note": "첫 쪽 썸네일만 있음. 전체 쪽 렌더링은 rhwp 설치 필요",
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
@@ -1232,12 +1476,23 @@ def cmd_convert(a) -> int:
     if os.path.exists(out) and os.path.samefile(a.file, out):
         # Formats are detected by content, so an HWPX named report.docx is valid input and
         # would otherwise be replaced by its own conversion.
-        sys.stderr.write(json.dumps({"error": "usage", "message": f"출력 경로가 입력 파일과 같습니다: {out}. "
-                                     "-o로 다른 경로를 지정하세요."}, ensure_ascii=False) + "\n")
+        sys.stderr.write(
+            json.dumps(
+                {
+                    "error": "usage",
+                    "message": f"출력 경로가 입력 파일과 같습니다: {out}. "
+                    "-o로 다른 경로를 지정하세요.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
         return 2
     # Stream into a temp file beside the destination and swap it in only once complete, so
     # a conversion error or a failed write (disk full, quota) leaves an existing file intact.
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(out)), prefix=".hwp_read-", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(os.path.abspath(out)), prefix=".hwp_read-", suffix=".tmp"
+    )
     try:
         with os.fdopen(fd, "wb") as f:
             write_docx(doc, f)
@@ -1255,32 +1510,69 @@ def cmd_convert(a) -> int:
             os.unlink(tmp)
         raise
     st = stats(doc, to_markdown(doc))
-    print(json.dumps({"format": "docx", "output": out, "tables": st["tables"], "merged_tables": st["merged_tables"],
-                      "preview_coverage": st["preview_coverage"], "warnings": st["warnings"],
-                      "note": "구조(문단·표·병합 셀)와 셀 테두리만 옮김. 글꼴·쪽 배치·그림은 포함되지 않음"},
-                     ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "format": "docx",
+                "output": out,
+                "tables": st["tables"],
+                "merged_tables": st["merged_tables"],
+                "preview_coverage": st["preview_coverage"],
+                "warnings": st["warnings"],
+                "note": "구조(문단·표·병합 셀)와 셀 테두리만 옮김. 글꼴·쪽 배치·그림은 포함되지 않음",
+            },
+            ensure_ascii=False,
+        )
+    )
     return _exit_code(st)
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="hwp_read", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("info"); p.add_argument("file"); p.set_defaults(fn=cmd_info)
-    p = sub.add_parser("extract"); p.add_argument("file"); p.add_argument("-o", "--output")
-    p.add_argument("--images-dir"); p.add_argument("--max-chars", type=int)
+    p = sub.add_parser("info")
+    p.add_argument("file")
+    p.set_defaults(fn=cmd_info)
+    p = sub.add_parser("extract")
+    p.add_argument("file")
+    p.add_argument("-o", "--output")
+    p.add_argument("--images-dir")
+    p.add_argument("--max-chars", type=int)
     p.set_defaults(fn=cmd_extract)
-    p = sub.add_parser("render"); p.add_argument("file"); p.add_argument("-o", "--output")
-    p.add_argument("--page", type=int); p.set_defaults(fn=cmd_render)
-    p = sub.add_parser("convert"); p.add_argument("file"); p.add_argument("--to", choices=["docx"], required=True)
-    p.add_argument("-o", "--output"); p.set_defaults(fn=cmd_convert)
+    p = sub.add_parser("render")
+    p.add_argument("file")
+    p.add_argument("-o", "--output")
+    p.add_argument("--page", type=int)
+    p.set_defaults(fn=cmd_render)
+    p = sub.add_parser("convert")
+    p.add_argument("file")
+    p.add_argument("--to", choices=["docx"], required=True)
+    p.add_argument("-o", "--output")
+    p.set_defaults(fn=cmd_convert)
     a = ap.parse_args(argv)
     try:
         return a.fn(a)
     except Unsupported as e:
-        sys.stderr.write(json.dumps({"error": "unsupported", "message": str(e)}, ensure_ascii=False) + "\n")
+        sys.stderr.write(
+            json.dumps({"error": "unsupported", "message": str(e)}, ensure_ascii=False)
+            + "\n"
+        )
         return 3
-    except (zipfile.BadZipFile, zlib.error, struct.error, ET.ParseError, KeyError, ValueError) as e:
-        sys.stderr.write(json.dumps({"error": "parse", "message": f"{type(e).__name__}: {e}"}, ensure_ascii=False) + "\n")
+    except (
+        zipfile.BadZipFile,
+        zlib.error,
+        struct.error,
+        ET.ParseError,
+        KeyError,
+        ValueError,
+    ) as e:
+        sys.stderr.write(
+            json.dumps(
+                {"error": "parse", "message": f"{type(e).__name__}: {e}"},
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
         return 1
 
 

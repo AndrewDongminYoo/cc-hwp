@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`cc-hwp` (the directory name is `claude-code-hwp-kit`): a skill, meant to ship as a Claude Code plugin and as a standalone claude.ai Skill, that lets agents read Korean Hangul documents (`.hwp` HWP 5.0 binary, `.hwpx` OWPML ZIP) as Markdown.
+`cc-hwp`: a skill, meant to ship as a Claude Code plugin and as a standalone claude.ai Skill, that lets agents read Korean Hangul documents (`.hwp` HWP 5.0 binary, `.hwpx` OWPML ZIP) as Markdown.
 Read-only for now; the goal includes editing, and an `.mcp.json` server was suggested as the path for it.
 
 ## Commands
@@ -18,6 +18,12 @@ python3 -m unittest discover tests
 # One test (name substring match)
 python3 -m unittest discover tests -k test_hwpx
 
+# Check changed files without applying fixes
+trunk check --no-fix
+
+# Full quality scan (initialization or an explicitly requested audit)
+trunk check --all --no-fix --jobs=2
+
 # Exercise the script directly
 python3 skills/hwp-read/scripts/hwp_read.py extract tests/fixtures/e-phi-design.hwp -o out.md   # JSON report on stderr
 python3 skills/hwp-read/scripts/hwp_read.py info tests/fixtures/sk-openinno-form.hwpx
@@ -25,7 +31,15 @@ python3 skills/hwp-read/scripts/hwp_read.py render tests/fixtures/e-phi-design.h
 ```
 
 `tests/` has no `__init__.py`, so `discover -s tests -t .` fails with "Start directory is not importable"; use the form above.
-No linter or formatter is configured yet.
+The full suite needs the local-only files `tests/fixtures/e-phi-design.hwp` and `tests/fixtures/sk-openinno-form.hwpx`.
+They are ignored by Git and must be restored locally from an authorized copy before claiming a full test pass.
+Do not replace them with generated samples or skip fixture tests to make the full suite pass.
+
+Trunk configuration is in `.trunk/trunk.yaml`.
+It checks diff whitespace and scans files for candidate secrets without remote credential verification.
+Pinact is locked to `4.1.1` with `lint` and `upgrade` for GitHub Actions files when present; the repository currently has no tracked workflows.
+The Python runtime managed by Trunk serves its diagnostic parsers, not the uploadable Skill.
+The pre-push check is enabled; automatic pre-commit formatting and Python style tools are not configured.
 
 ## Hard constraints
 
@@ -64,3 +78,12 @@ detect(bytes) ─┬─ hwp5 → CFB → Hwp5Reader ─┐
 - `test_distribution_flag_rejected` flips the 배포용 bit in an in-memory copy of a real fixture's FileHeader rather than shipping a protected sample.
 - Fixtures are real public documents on purpose; generator-made samples are too clean to find parser limits. Still missing: documents with footnotes, equations, pictures inside tables, and a genuine 배포용 file. Add those as regression fixtures when available.
 - The two current fixtures (a 한국동서발전 service design document and a 서울창업센터 application form) are local-only by the operator's decision (2026-10-03): they are publicly posted documents but are not committed.
+
+## Offline scanner boundary
+
+Run `python3 -B .trunk/configs/tests/test_trufflehog_to_sarif.py` to exercise the 15 filesystem JSONL diagnostic reader cases.
+Trunk 1.25.0 consumes native paths in the SARIF path field; URI encoding drops findings for reserved filenames.
+This adapter preserves native paths for Trunk and does not promise portable SARIF URI conformance.
+Columns use Unicode code points, encoded findings retain file-level diagnostics, and scanner input errors fail the gate with `--fail-on-scan-errors`.
+No candidate credential is verified with its provider.
+Application source and document fixtures remain unchanged.

@@ -1,0 +1,37 @@
+version: 0.1
+cli:
+  version: 1.25.0
+plugins:
+  sources:
+    - id: trunk
+      ref: v1.11.0
+      uri: https://github.com/trunk-io/plugins
+runtimes:
+  enabled:
+    - python@3.14.4
+lint:
+  enabled:
+    - git-diff-check
+    - pinact@4.1.1!:
+        commands: [lint, upgrade]
+    - trufflehog@3.99.7
+  definitions:
+    - name: pinact
+      commands:
+        - name: upgrade
+          enabled: true
+    - name: trufflehog
+      commands:
+        - name: lint
+          # Scan locally without validating candidate credentials with providers.
+          run: trufflehog filesystem --json --fail --fail-on-scan-errors --no-verification --no-update ${target}
+          direct_configs:
+            - .trunk/configs/trufflehog_to_sarif.py
+          parser:
+            runtime: python
+            run: python3 .trunk/configs/trufflehog_to_sarif.py
+actions:
+  disabled:
+    - trunk-fmt-pre-commit
+  enabled:
+    - trunk-check-pre-push

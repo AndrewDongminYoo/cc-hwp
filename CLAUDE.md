@@ -81,9 +81,13 @@ detect(bytes) ─┬─ hwp5 → CFB → Hwp5Reader ─┐
 
 ## Offline scanner boundary
 
-Run `python3 -B .trunk/configs/tests/test_trufflehog_to_sarif.py` to exercise the 15 filesystem JSONL diagnostic reader cases.
+Run `python3 -B .trunk/configs/tests/test_trufflehog_to_sarif.py` to exercise the 17 filesystem JSONL diagnostic reader cases.
 Trunk 1.25.0 consumes native paths in the SARIF path field; URI encoding drops findings for reserved filenames.
 This adapter preserves native paths for Trunk and does not promise portable SARIF URI conformance.
 Columns use Unicode code points, encoded findings retain file-level diagnostics, and scanner input errors fail the gate with `--fail-on-scan-errors`.
 No candidate credential is verified with its provider.
 Application source and document fixtures remain unchanged.
+
+Source-location analysis reads at most 1 MiB plus one sentinel byte per file and caches at most eight files.
+Oversized sources retain file-level findings without a region.
+These limits bound source context; they do not bound all result memory or guarantee that filesystem I/O cannot block.

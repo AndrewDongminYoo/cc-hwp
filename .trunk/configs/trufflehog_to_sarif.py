@@ -5,18 +5,28 @@ import json
 import sys
 from pathlib import Path
 
+MAX_SOURCE_BYTES = 1024 * 1024
+MAX_CACHED_FILES = 8
+
 
 def physical_location(filename, secret, line_hint, files, offsets):
     # Trunk 1.25.0 resolves this as a native path and drops URI-escaped paths.
     location = {"artifactLocation": {"uri": filename}}
+    if not secret:
+        return location
     if filename not in files:
+        if len(files) >= MAX_CACHED_FILES:
+            files.pop(next(iter(files)))
         try:
-            with Path(filename).open(encoding="utf-8", newline="") as source:
-                files[filename] = source.read()
+            with Path(filename).open("rb") as source:
+                data = source.read(MAX_SOURCE_BYTES + 1)
+            files[filename] = (
+                data.decode("utf-8") if len(data) <= MAX_SOURCE_BYTES else None
+            )
         except (OSError, UnicodeError, ValueError):
             files[filename] = None
     content = files[filename]
-    if not secret or content is None:
+    if content is None:
         return location
 
     position = -1

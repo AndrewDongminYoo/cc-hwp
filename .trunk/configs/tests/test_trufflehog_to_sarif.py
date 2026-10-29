@@ -52,6 +52,26 @@ class TruffleHogReaderTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return json.loads(completed.stdout)["runs"][0]["results"]
 
+    def measured_results(self, findings):
+        wrapper = (
+            "import runpy, sys, tracemalloc\n"
+            "tracemalloc.start()\n"
+            "try:\n"
+            "    runpy.run_path(sys.argv[1], run_name='__main__')\n"
+            "finally:\n"
+            "    print('reader_peak_bytes=' + str(tracemalloc.get_traced_memory()[1]), file=sys.stderr)\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", wrapper, str(READER)],
+            input="".join(json.dumps(item) + "\n" for item in findings),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        peak = int(completed.stderr.rpartition("reader_peak_bytes=")[2].strip())
+        return json.loads(completed.stdout)["runs"][0]["results"], peak
+
     def location(self, result):
         return result["locations"][0]["physicalLocation"]
 
@@ -72,6 +92,31 @@ class TruffleHogReaderTest(unittest.TestCase):
         emitted = self.location(result)["artifactLocation"]["uri"]
         self.assertEqual(emitted, filename)
         self.assertTrue(Path(emitted).samefile(filename))
+
+    def test_large_source_keeps_a_file_level_finding(self):
+        filename = self.fixture(
+            "large.txt", "synthetic-secret\n" + "x" * (32 * 1024 * 1024)
+        )
+        results, peak = self.measured_results([self.finding(filename)])
+        self.assertLess(peak, 16 * 1024 * 1024)
+        self.assertEqual(len(results), 1)
+        location = self.location(results[0])
+        self.assertEqual(location["artifactLocation"]["uri"], filename)
+        self.assertNotIn("region", location)
+
+    def test_source_cache_memory_is_bounded_and_offsets_survive_eviction(self):
+        findings = []
+        filler = "x" * (768 * 1024)
+        for index in range(32):
+            prefix = "synthetic-secret\n" * (2 if index == 0 else 1)
+            filename = self.fixture(f"cache-{index}.txt", prefix + filler)
+            findings.append(self.finding(filename))
+        findings.append(findings[0])
+        results, peak = self.measured_results(findings)
+        self.assertLess(peak, 16 * 1024 * 1024)
+        self.assertEqual(len(results), len(findings))
+        self.assertEqual(self.location(results[0])["region"]["startLine"], 1)
+        self.assertEqual(self.location(results[-1])["region"]["startLine"], 2)
 
     def test_encoded_finding_survives_without_literal_location(self):
         raw = "synthetic-secret"

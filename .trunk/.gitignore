@@ -1,0 +1,8 @@
+actions/
+logs/
+notifications/
+out/
+plugins/
+tools/
+user.yaml
+user.yaml.lock

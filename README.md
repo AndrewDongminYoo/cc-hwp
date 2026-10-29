@@ -14,7 +14,7 @@ HOP·한컴오피스에서 PDF로 변환해 올리던 과정을 없앱니다.
 
 Claude Code:
 
-```
+```plaintext
 /plugin marketplace add AndrewDongminYoo/cc-hwp
 /plugin install cc-hwp@cc-hwp
 ```

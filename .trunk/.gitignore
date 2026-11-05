@@ -1,8 +1,9 @@
-actions/
-logs/
-notifications/
-out/
-plugins/
-tools/
+*out
+*logs
+*actions
+*notifications
+*tools
+plugins
+user_trunk.yaml
 user.yaml
-user.yaml.lock
+tmp

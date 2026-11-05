@@ -19,7 +19,7 @@
 Keep logs and the knowledge claim inventory in `/Volumes/dongminyu/Development/01_personal/pr-loop-reviews/cc-hwp/2026-10-28-quality-refresh`.
 The full unittest command requires ignored local documents `tests/fixtures/e-phi-design.hwp` and `tests/fixtures/sk-openinno-form.hwpx`.
 Both were absent at the initial fixture preflight.
-The operator restored the exact local documents on 2026-10-29.
+The exact local documents were restored on 2026-10-29.
 The unchanged full suite passed all 60 original tests after fixture recovery.
 The reader suite now covers 17 cases, including bounded source context and cache eviction.
 Re-run the full no-fix Trunk check after each scanner repair before pushing.

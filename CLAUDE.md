@@ -77,7 +77,7 @@ detect(bytes) ─┬─ hwp5 → CFB → Hwp5Reader ─┐
 - Each fixture test asserts `preview_coverage == 1.0`, a minimum table count, and **character conservation**: every visible character in the raw source text records must survive into the Markdown. The raw text is re-extracted by test-local code (`_raw_hwp5_chars`, `_raw_hwpx_chars`) that bypasses tree, paragraph and table assembly. The HWP 5.0 side still reuses `CFB`, `_records`, and the `EXTENDED_CTRL`/`INLINE_CTRL` tables, so a bug in those layers corrupts both sides of the comparison and passes; the conservation test does not protect edits there.
 - `test_distribution_flag_rejected` flips the 배포용 bit in an in-memory copy of a real fixture's FileHeader rather than shipping a protected sample.
 - Fixtures are real public documents on purpose; generator-made samples are too clean to find parser limits. Still missing: documents with footnotes, equations, pictures inside tables, and a genuine 배포용 file. Add those as regression fixtures when available.
-- The two current fixtures (a 한국동서발전 service design document and a 서울창업센터 application form) are local-only by Dongmin Yu's decision (2026-10-03): they are publicly posted documents but are not committed.
+- The two current fixtures (a 한국동서발전 service design document and a 서울창업센터 application form) are local-only by the decision of 2026-10-03: they are publicly posted documents but are not committed.
 
 ## Offline scanner boundary
 

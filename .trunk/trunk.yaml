@@ -28,7 +28,7 @@ lint:
   enabled:
     - git-diff-check
     - pinact@4.1.1!
-    - trufflehog@3.99.8
+    - trufflehog@3.99.9
 actions:
   disabled:
     - trunk-fmt-pre-commit
